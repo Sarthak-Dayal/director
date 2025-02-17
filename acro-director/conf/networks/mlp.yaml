@@ -1,0 +1,7 @@
+hidden_layers:
+  - size: 256
+    activation: relu
+  - size: 128
+    activation: tanh
+  - size: 64
+    activation: sigmoid
