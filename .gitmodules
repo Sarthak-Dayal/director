@@ -3,4 +3,4 @@
 	url = https://github.com/AbhinavPeri/agent-centric-representations-tensorflow.git
 [submodule "dreamerv3-torch"]
 	path = dreamerv3-torch
-	url = https://github.com/NM512/dreamerv3-torch.git
+	url = https://github.com/AbhinavPeri/dreamerv3-torch.git 
