@@ -128,7 +128,7 @@ class RSSM(Module):
         x = self.get('img_out', Dense, **self._kw)(deter)
         stats = self._stats_layer('img_stats', x)
         dist_obj = self.get_dist(stats)
-        return self._cast(dist_obj.mode())
+        return self._cast(dist_obj.mode)
 
     def _gru(self, x, deter):
         x = torch.cat([deter, x], dim=-1)
@@ -425,10 +425,10 @@ class Conv2D(Module):
         self.depth = depth
         self.bias = bias
         if transp:
-            self.layer = nn.ConvTranspose2d(in_channels=0, out_channels=depth, kernel_size=kernel,
+            self.layer = nn.LazyConvTranspose2d(out_channels=depth, kernel_size=kernel,
                                              stride=stride, bias=bias)
         else:
-            self.layer = nn.Conv2d(in_channels=0, out_channels=depth, kernel_size=kernel,
+            self.layer = nn.LazyConv2d(out_channels=depth, kernel_size=kernel,
                                    stride=stride, bias=bias)
 
     def forward(self, hidden):

@@ -71,14 +71,15 @@ class EmbodiedPrefetch:
 # =============================================================================
 
 # Assume that you have equivalent PyTorch implementations in your "nets_torch" and "behaviors" modules.
-from . import behaviors, nets_torch  # These modules must be reimplemented for PyTorch.
+from . import behaviors, nets_torch, tfagent  # These modules must be reimplemented for PyTorch.
 
-class Agent:
+class Agent(tfagent.TFAgent):
 
     configs = yaml.YAML(typ='safe').load((
         embodied.Path(sys.argv[0]).parent / 'configs.yaml').read())
 
     def __init__(self, obs_space, act_space, step, config):
+        super().__init__()
         self.config = config
         self.obs_space = obs_space
         self.act_space = act_space['action']
@@ -211,7 +212,7 @@ class WorldModel(nn.Module):
         self.wmkl = AutoAdapt((), **self.config.wmkl, inverse=False)
 
     def train(self, data, state=None):
-        self.train()  # set module to training mode
+        super(WorldModel, self).train()  # set module to training mode
         loss, state, outputs, metrics = self.loss(data, state, training=True)
         self.model_opt.zero_grad()
         loss.backward()

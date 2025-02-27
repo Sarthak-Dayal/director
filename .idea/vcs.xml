@@ -3,6 +3,5 @@
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/agent-centric-representations-tensorflow" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/dreamerv3-torch" vcs="Git" />
   </component>
 </project>

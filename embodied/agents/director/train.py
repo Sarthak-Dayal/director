@@ -20,7 +20,7 @@ import embodied
 
 
 def main(argv=None):
-  from . import agent as agnt
+  from . import agent_torch as agnt
   from . import train_with_viz
 
   parsed, other = embodied.Flags(

@@ -1,565 +1,563 @@
-import inspect
-import logging
-import os
-import re
-
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-logging.getLogger().setLevel('ERROR')
-
+# tfutils.py
 import numpy as np
-import tensorflow as tf
-import tensorflow_probability as tfp
-from tensorflow.keras import mixed_precision as prec
-from tensorflow_probability import distributions as tfd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.distributions as td
+import re
+import inspect
 
-try:
-  from tensorflow.python.distribute import values
-except Exception:
-  from google3.third_party.tensorflow.python.distribute import values
-
-
-for base in (tf.Tensor, tf.Variable, values.PerReplica):
-  base.mean = tf.math.reduce_mean
-  base.std = tf.math.reduce_std
-  base.var = tf.math.reduce_variance
-  base.sum = tf.math.reduce_sum
-  base.prod = tf.math.reduce_prod
-  base.any = tf.math.reduce_any
-  base.all = tf.math.reduce_all
-  base.min = tf.math.reduce_min
-  base.max = tf.math.reduce_max
-  base.abs = tf.math.abs
-  base.logsumexp = tf.math.reduce_logsumexp
-  base.transpose = tf.transpose
-  base.reshape = tf.reshape
-  base.astype = tf.cast
-  base.flatten = lambda x: tf.reshape(x, [-1])
-
-
+# ---------------------------------------------------------------------------
+# Basic helper functions
+# ---------------------------------------------------------------------------
 def tensor(value):
-  if isinstance(value, values.PerReplica):
-    return value
-  return tf.convert_to_tensor(value)
-tf.tensor = tensor
+    """Convert a value to a torch.Tensor if not already one."""
+    if isinstance(value, torch.Tensor):
+        return value
+    return torch.tensor(value)
 
+def map_structure(fn, x):
+    """Recursively apply fn to all elements in a nested structure (dict/list/tuple)."""
+    if isinstance(x, dict):
+        return {k: map_structure(fn, v) for k, v in x.items()}
+    elif isinstance(x, (list, tuple)):
+        return type(x)(map_structure(fn, v) for v in x)
+    else:
+        return fn(x)
 
-def shuffle(tensor, axis):
-  perm = list(range(len(tensor.shape)))
-  perm.pop(axis)
-  perm.insert(0, axis)
-  tensor = tensor.transpose(perm)
-  tensor = tf.random.shuffle(tensor)
-  tensor = tensor.transpose(perm)
-  return tensor
-
+def shuffle(x, axis):
+    """Shuffle the tensor x along the specified axis."""
+    perm = list(range(x.ndim))
+    perm.pop(axis)
+    perm.insert(0, axis)
+    x_perm = x.permute(perm)
+    idx = torch.randperm(x_perm.size(0))
+    x_shuffled = x_perm.index_select(0, idx)
+    # Invert permutation.
+    inv_perm = [0] * len(perm)
+    for i, j in enumerate(perm):
+        inv_perm[j] = i
+    return x_shuffled.permute(inv_perm)
 
 def scan(fn, inputs, start, static=True, reverse=False, axis=0):
-  assert axis in (0, 1), axis
-  if axis == 1:
-    swap = lambda x: tf.transpose(x, [1, 0] + list(range(2, len(x.shape))))
-    inputs = tf.nest.map_structure(swap, inputs)
-  if not static:
-    return tf.scan(fn, inputs, start, reverse=reverse)
-  last = start
-  outputs = [[] for _ in tf.nest.flatten(start)]
-  indices = range(tf.nest.flatten(inputs)[0].shape[0])
-  if reverse:
-    indices = reversed(indices)
-  for index in indices:
-    inp = tf.nest.map_structure(lambda x: x[index], inputs)
-    last = fn(last, inp)
-    tf.nest.assert_same_structure(last, start)
-    [o.append(l) for o, l in zip(outputs, tf.nest.flatten(last))]
-  if reverse:
-    outputs = [list(reversed(x)) for x in outputs]
-  outputs = [tf.stack(x, axis) for x in outputs]
-  return tf.nest.pack_sequence_as(start, outputs)
-
+    """
+    A simple static scan function (like tf.scan) which applies fn iteratively
+    along a given axis.
+    """
+    if axis == 1:
+        # Transpose first two dimensions so that scan always runs along dim 0.
+        def swap(x):
+            dims = list(range(x.ndim))
+            dims[0], dims[1] = dims[1], dims[0]
+            return x.permute(dims)
+        if isinstance(inputs, (list, tuple)):
+            inputs = [swap(x) for x in inputs]
+        else:
+            inputs = swap(inputs)
+    last = start
+    collected = []
+    # Assume inputs is a tensor or list/tuple of tensors with scan dimension at index 0.
+    length = inputs[0].shape[0] if isinstance(inputs, (list, tuple)) else inputs.shape[0]
+    indices = list(range(length))
+    if reverse:
+        indices = indices[::-1]
+    for i in indices:
+        inp = [x[i] for x in inputs] if isinstance(inputs, (list, tuple)) else inputs[i]
+        last = fn(last, inp)
+        collected.append(last)
+    out = torch.stack(collected, dim=axis)
+    if axis == 1:
+        def unswap(x):
+            dims = list(range(x.ndim))
+            dims[0], dims[1] = dims[1], dims[0]
+            return x.permute(dims)
+        out = unswap(out)
+    return out
 
 def symlog(x):
-  return tf.sign(x) * tf.math.log(1 + tf.abs(x))
-
+    """Symmetric logarithm: sign(x) * log(1 + |x|)."""
+    return torch.sign(x) * torch.log1p(torch.abs(x))
 
 def symexp(x):
-  return tf.sign(x) * (tf.math.exp(tf.abs(x)) - 1)
-
+    """Inverse of symlog: sign(x) * (exp(|x|) - 1)."""
+    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
 
 def action_noise(action, amount, act_space):
-  if amount == 0:
-    return action
-  amount = tf.cast(amount, action.dtype)
-  if act_space.discrete:
-    probs = amount / action.shape[-1] + (1 - amount) * action
-    return OneHotDist(probs=probs).sample()
-  else:
-    return tf.clip_by_value(tfd.Normal(action, amount).sample(), -1, 1)
+    """
+    Apply noise to an action. For discrete action spaces, blend with a uniform distribution;
+    for continuous actions, add Gaussian noise.
+    """
+    if amount == 0:
+        return action
+    amount = tensor(amount).to(action.dtype).to(action.device)
+    if act_space.discrete:
+        # Blend current action with uniform noise.
+        probs = amount / action.shape[-1] + (1 - amount) * action
+        return OneHotDist(probs=probs).sample()
+    else:
+        noise = td.Normal(action, amount).sample()
+        return torch.clamp(noise, -1, 1)
 
+def lambda_return(reward, value, pcont, bootstrap, lambda_, axis):
+    """
+    Compute the lambda-return for discounting rewards.
+    """
+    if isinstance(pcont, (int, float)):
+        pcont = pcont * torch.ones_like(reward)
+    dims = list(range(reward.ndim))
+    new_order = [axis] + dims[1:axis] + [0] + dims[axis+1:]
+    if axis != 0:
+        reward = reward.permute(new_order)
+        value = value.permute(new_order)
+        pcont = pcont.permute(new_order)
+    if bootstrap is None:
+        bootstrap = torch.zeros_like(value[-1])
+    next_values = torch.cat([value[1:], bootstrap.unsqueeze(0)], dim=0)
+    inputs = reward + pcont * next_values * (1 - lambda_)
+    returns = scan(lambda agg, cur: cur[0] + cur[1] * lambda_ * agg,
+                   (inputs, pcont), bootstrap, static=True, reverse=True, axis=0)
+    if axis != 0:
+        inv_order = [0] * len(new_order)
+        for i, j in enumerate(new_order):
+            inv_order[j] = i
+        returns = returns.permute(inv_order)
+    return returns
 
-def lambda_return(
-    reward, value, pcont, bootstrap, lambda_, axis):
-  # Setting lambda=1 gives a discounted Monte Carlo return.
-  # Setting lambda=0 gives a fixed 1-step return.
-  assert reward.shape.ndims == value.shape.ndims, (reward.shape, value.shape)
-  if isinstance(pcont, (int, float)):
-    pcont = pcont * tf.ones_like(reward)
-  dims = list(range(reward.shape.ndims))
-  dims = [axis] + dims[1:axis] + [0] + dims[axis + 1:]
-  if axis != 0:
-    reward = tf.transpose(reward, dims)
-    value = tf.transpose(value, dims)
-    pcont = tf.transpose(pcont, dims)
-  if bootstrap is None:
-    bootstrap = tf.zeros_like(value[-1])
-  next_values = tf.concat([value[1:], bootstrap[None]], 0)
-  inputs = reward + pcont * next_values * (1 - lambda_)
-  returns = scan(
-      lambda agg, cur: cur[0] + cur[1] * lambda_ * agg,
-      (inputs, pcont), bootstrap, static=True, reverse=True)
-  if axis != 0:
-    returns = tf.transpose(returns, dims)
-  return returns
+def video_grid(video):
+    """Arrange video tensor (B, T, H, W, C) into a grid."""
+    B, T, H, W, C = video.shape
+    video = video.permute(1, 2, 0, 3, 4)
+    return video.reshape(T, H, B * W, C)
 
+def balance_stats(dist, target, thres):
+    """Compute balanced loss and accuracy statistics."""
+    target = target.to(torch.float32)
+    pos = (target > thres).to(torch.float32)
+    neg = (target <= thres).to(torch.float32)
+    pred = (dist.mean().to(torch.float32) > thres).to(torch.float32)
+    loss = -dist.log_prob(target)
+    return dict(
+        pos_loss=(loss * pos).sum() / pos.sum(),
+        neg_loss=(loss * neg).sum() / neg.sum(),
+        pos_acc=(pred * pos).sum() / pos.sum(),
+        neg_acc=((1 - pred) * neg).sum() / neg.sum(),
+        rate=pos.mean(),
+        avg=target.mean(),
+        pred=dist.mean().mean(),
+    )
 
-class Module(tf.Module):
+# ---------------------------------------------------------------------------
+# Core Module and Optimizer Classes
+# ---------------------------------------------------------------------------
+class Module(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Define any submodules here if needed.
 
-  def save(self):
-    values = tf.nest.map_structure(lambda x: x.numpy(), self.variables)
-    amount = len(tf.nest.flatten(values))
-    count = int(sum(np.prod(x.shape) for x in tf.nest.flatten(values)))
-    print(f'Saving module with {amount} tensors and {count} parameters.')
-    return values
+    def save(self):
+        """Save parameters using state_dict and convert tensors to NumPy arrays."""
+        state = self.state_dict()
+        values = {name: param.detach().cpu().numpy() for name, param in state.items()}
+        amount = len(values)
+        count = int(sum(np.prod(val.shape) for val in values.values()))
+        print(f"Saving module with {amount} tensors and {count} parameters.")
+        return values
 
-  def load(self, values):
-    amount = len(tf.nest.flatten(values))
-    count = int(sum(np.prod(x.shape) for x in tf.nest.flatten(values)))
-    print(f'Loading module with {amount} tensors and {count} parameters.')
-    tf.nest.map_structure(lambda x, y: x.assign(y), self.variables, values)
+    def load(self, values):
+        """Load parameters using load_state_dict after converting NumPy arrays to tensors."""
+        # Convert numpy arrays back to torch tensors.
+        state = {name: torch.tensor(param) for name, param in values.items()}
+        print(f"Loading module with {len(state)} tensors.")
+        self.load_state_dict(state)
 
-  def get(self, name, ctor, *args, **kwargs):
-    if not hasattr(self, '_modules'):
-      self._modules = {}
-    if name not in self._modules:
-      if 'name' in inspect.signature(ctor).parameters:
-        kwargs['name'] = name
-      self._modules[name] = ctor(*args, **kwargs)
-    return self._modules[name]
+    def get(self, name, ctor, *args, **kwargs):
+        """
+        Retrieve a submodule or parameter by name. If it does not exist, create it
+        using the provided constructor. If the constructor accepts a 'name' argument,
+        it is passed automatically.
+        """
+        # If already registered as a submodule, return it.
+        if name in self._modules:
+            return self._modules[name]
+
+        # If the constructor takes a 'name' argument, pass the name.
+        if 'name' in inspect.signature(ctor).parameters:
+            kwargs['name'] = name
+
+        # Create the module or tensor.
+        mod = ctor(*args, **kwargs)
+
+        # If it's an nn.Module, register it. Otherwise, if it's a tensor, wrap it as a parameter.
+        if isinstance(mod, nn.Module):
+            setattr(self, name, mod)
+        else:
+            mod = nn.Parameter(mod) if isinstance(mod, torch.Tensor) else mod
+            setattr(self, name, mod)
+
+        return mod
 
 
 class Optimizer(Module):
+    def __init__(self, name, lr, opt='adam', eps=1e-5, clip=0.0, warmup=0, wd=0.0, wd_pattern='kernel'):
+        super().__init__()
+        assert 0 <= wd < 1, "weight decay must be in [0,1)"
+        if clip:
+            assert clip >= 1, "clip must be at least 1"
+        self._name = name
+        self._clip = clip
+        self._warmup = warmup
+        self._wd = wd
+        self._wd_pattern = wd_pattern
+        self._updates = 0
+        self._base_lr = lr
+        self._lr = lr
+        self._opt_type = opt
+        self._eps = eps
+        self._scaling = False  # Mixed precision scaling not implemented here.
+        self._optimizer = None
 
-  def __init__(
-      self, name, lr, opt='adam', eps=1e-5, clip=0.0, warmup=0, wd=0.0,
-      wd_pattern='kernel'):
-    assert 0 <= wd < 1
-    assert not clip or 1 <= clip
-    self._name = name
-    self._clip = clip
-    self._warmup = warmup
-    self._wd = wd
-    self._wd_pattern = wd_pattern
-    self._updates = tf.Variable(0, trainable=False, dtype=tf.int64)
-    self._lr = lr
-    if warmup:
-      self._lr = lambda: lr * tf.clip_by_value(
-          self._updates.astype(tf.float32) / warmup, 0.0, 1.0)
-    self._opt = {
-        'adam': lambda: tf.optimizers.Adam(self._lr, epsilon=eps),
-        'sgd': lambda: tf.optimizers.SGD(self._lr),
-        'momentum': lambda: tf.optimizers.SGD(self._lr, 0.9),
-    }[opt]()
-    self._scaling = (prec.global_policy().compute_dtype == tf.float16)
-    if self._scaling:
-      self._grad_scale = tf.Variable(1e4, trainable=False, dtype=tf.float32)
-      self._fine_steps = tf.Variable(0, trainable=False, dtype=tf.int64)
-    self._once = True
+    @property
+    def variables(self):
+        return list(self.parameters())
 
-  @property
-  def variables(self):
-    return self._opt.variables()
+    def step(self, loss, modules):
+        if not isinstance(modules, (list, tuple)):
+            modules = [modules]
+        varibs = []
+        for module in modules:
+            varibs.extend(list(module.parameters()))
+        count = sum(np.prod(p.shape) for p in varibs)
+        if self._updates == 0:
+            print(f"Found {count} {self._name} parameters.")
+        if self._optimizer is None:
+            if self._opt_type == 'adam':
+                self._optimizer = torch.optim.Adam(varibs, lr=self._lr, eps=self._eps)
+            elif self._opt_type == 'sgd':
+                self._optimizer = torch.optim.SGD(varibs, lr=self._lr)
+            elif self._opt_type == 'momentum':
+                self._optimizer = torch.optim.SGD(varibs, lr=self._lr, momentum=0.9)
+            else:
+                raise NotImplementedError(self._opt_type)
+        self._optimizer.zero_grad()
+        loss.backward()
+        if self._clip:
+            torch.nn.utils.clip_grad_norm_(varibs, self._clip)
+        if self._wd:
+            for module in modules:
+                for name, param in module.named_parameters():
+                    if re.search(self._wd_pattern, name):
+                        param.data.mul_(1 - self._wd * self._lr)
+        self._optimizer.step()
+        self._updates += 1
+        if self._warmup:
+            warmup_factor = min(self._updates / self._warmup, 1.0)
+            self._lr = self._base_lr * warmup_factor
+            for param_group in self._optimizer.param_groups:
+                param_group['lr'] = self._lr
+        total_norm = 0.0
+        for p in varibs:
+            if p.grad is not None:
+                total_norm += p.grad.data.norm(2).item() ** 2
+        total_norm = total_norm ** 0.5
+        metrics = {
+            f'{self._name}_loss': loss.item(),
+            f'{self._name}_grad_steps': self._updates,
+            f'{self._name}_grad_norm': total_norm,
+        }
+        return metrics
 
-  def __call__(self, tape, loss, modules):
-    assert loss.dtype is tf.float32, (self._name, loss.dtype)
-    assert len(loss.shape) == 0, (self._name, loss.shape)
-    metrics = {}
+    @staticmethod
+    def video_grid(video):
+        B, T, H, W, C = video.shape
+        video = video.permute(1, 2, 0, 3, 4)
+        return video.reshape(T, H, B * W, C)
 
-    # Find variables.
-    modules = modules if hasattr(modules, '__len__') else (modules,)
-    varibs = tf.nest.flatten([
-        module.trainable_variables for module in modules])
-    count = sum(int(np.prod(x.shape)) for x in varibs)
-    self._once and print(f'Found {count} {self._name} parameters.')
+    @staticmethod
+    def balance_stats(dist, target, thres):
+        target = target.to(torch.float32)
+        pos = (target > thres).to(torch.float32)
+        neg = (target <= thres).to(torch.float32)
+        pred = (dist.mean().to(torch.float32) > thres).to(torch.float32)
+        loss = -dist.log_prob(target)
+        return dict(
+            pos_loss=(loss * pos).sum() / pos.sum(),
+            neg_loss=(loss * neg).sum() / neg.sum(),
+            pos_acc=(pred * pos).sum() / pos.sum(),
+            neg_acc=((1 - pred) * neg).sum() / neg.sum(),
+            rate=pos.mean(),
+            avg=target.mean(),
+            pred=dist.mean().mean(),
+        )
 
-    # Check loss.
-    tf.debugging.check_numerics(loss, self._name + '_loss')
-    metrics[f'{self._name}_loss'] = loss
+# ---------------------------------------------------------------------------
+# Distribution Classes (wrappers)
+# ---------------------------------------------------------------------------
+class MSEDist(td.Distribution):
+    arg_constraints = {}
+    support = td.constraints.real
+    has_rsample = False
 
-    # Compute scaled gradient.
-    if self._scaling:
-      with tape:
-        loss = self._grad_scale * loss
-    grads = tape.gradient(loss, varibs)
-    for var, grad in zip(varibs, grads):
-      if grad is None:
-        raise RuntimeError(
-            f'{self._name} optimizer found no gradient for {var.name}.')
+    def __init__(self, pred, dims, agg='sum'):
+        self.pred = pred
+        self._dims = dims
+        self._axes = tuple(-i for i in range(1, dims+1))
+        self._agg = agg
 
-    # Distributed sync.
-    if tf.distribute.has_strategy():
-      context = tf.distribute.get_replica_context()
-      grads = context.all_reduce('mean', grads)
+    @property
+    def batch_shape(self):
+        return self.pred.shape[:-self._dims] if self._dims > 0 else self.pred.shape
 
-    if self._scaling:
-      grads = tf.nest.map_structure(lambda x: x / self._grad_scale, grads)
-      overflow = ~tf.reduce_all([
-          tf.math.is_finite(x).all() for x in tf.nest.flatten(grads)])
-      metrics[f'{self._name}_grad_scale'] = self._grad_scale
-      metrics[f'{self._name}_grad_overflow'] = overflow.astype(tf.float32)
-      keep = (~overflow & (self._fine_steps < 1000))
-      incr = (~overflow & (self._fine_steps >= 1000))
-      decr = overflow
-      self._fine_steps.assign(keep.astype(tf.int64) * (self._fine_steps + 1))
-      self._grad_scale.assign(tf.clip_by_value(
-          keep.astype(tf.float32) * self._grad_scale +
-          incr.astype(tf.float32) * self._grad_scale * 2 +
-          decr.astype(tf.float32) * self._grad_scale / 2,
-          1e-4, 1e4))
-    else:
-      overflow = False
+    @property
+    def event_shape(self):
+        return self.pred.shape[-self._dims:] if self._dims > 0 else torch.Size()
 
-    # Gradient clipping.
-    norm = tf.linalg.global_norm(grads)
-    if self._clip:
-      grads, _ = tf.clip_by_global_norm(grads, self._clip, norm)
-    if self._scaling:
-      norm = tf.where(tf.math.is_finite(norm), norm, np.nan)
-    else:
-      tf.debugging.check_numerics(norm, self._name + '_norm')
-    metrics[f'{self._name}_grad_norm'] = norm
+    def mean(self):
+        return self.pred
 
-    # Weight decay.
-    if self._wd:
-      if ~overflow:
-        self._apply_weight_decay(varibs)
+    def mode(self):
+        return self.pred
 
-    # Apply gradients.
-    if ~overflow:
-      self._opt.apply_gradients(
-          zip(grads, varibs),
-          experimental_aggregate_gradients=False)
-      self._updates.assign_add(1)
-    metrics[f'{self._name}_grad_steps'] = self._updates
+    def sample(self, sample_shape=torch.Size(), seed=None):
+        return self.pred.expand(sample_shape + self.pred.shape)
 
-    self._once = False
-    return metrics
+    def log_prob(self, value):
+        assert self.pred.shape == value.shape, f"{self.pred.shape} vs {value.shape}"
+        distance = (self.pred - value) ** 2
+        if self._agg == 'mean':
+            loss = distance.mean(dim=self._axes)
+        elif self._agg == 'sum':
+            loss = distance.sum(dim=self._axes)
+        else:
+            raise NotImplementedError(self._agg)
+        return -loss
 
-  def _apply_weight_decay(self, varibs):
-    lr = self._lr() if callable(self._lr) else self._lr
-    log = (self._wd_pattern != r'.*') and self._once
-    if log:
-      print(f"Optimizer applied weight decay to {self._name} variables:")
-    included, excluded = [], []
-    for var in sorted(varibs, key=lambda x: x.name):
-      if re.search(self._wd_pattern, self._name + '/' + var.name):
-        var.assign((1 - self._wd * lr) * var)
-        included.append(var.name)
-      else:
-        excluded.append(var.name)
-    if log:
-      for name in included:
-        print(f'[x] {name}')
-      for name in excluded:
-        print(f'[ ] {name}')
-      print('')
+class CosineDist(td.Distribution):
+    arg_constraints = {}
+    support = td.constraints.real
+    has_rsample = False
 
+    def __init__(self, pred):
+        self.pred = F.normalize(pred, p=2, dim=-1)
 
-class MSEDist(tfd.Distribution):
+    @property
+    def batch_shape(self):
+        return self.pred.shape[:-1]
 
-  def __init__(self, pred, dims, agg='sum'):
-    super().__init__(pred.dtype, tfd.FULLY_REPARAMETERIZED, False, True)
-    self.pred = pred
-    self._dims = dims
-    self._axes = tuple([-x for x in range(1, dims + 1)])
-    self._agg = agg
+    @property
+    def event_shape(self):
+        return self.pred.shape[-1:]
 
-  @classmethod
-  def _parameter_properties(cls, dtype, num_classes=None):
-    return {'pred': tfp.util.ParameterProperties()}
+    def mean(self):
+        return self.pred
 
-  def _batch_shape(self):
-    return self.pred.shape[:len(self.pred.shape) - self._dims]
+    def mode(self):
+        return self.pred
 
-  def _event_shape(self):
-    return self.pred.shape[len(self.pred.shape) - self._dims:]
+    def sample(self, sample_shape=torch.Size(), seed=None):
+        return self.pred.expand(sample_shape + self.pred.shape)
 
-  def mean(self):
-    return self.pred
+    def log_prob(self, value):
+        assert self.pred.shape == value.shape, f"{self.pred.shape} vs {value.shape}"
+        return (self.pred * value).sum(dim=-1)
 
-  def mode(self):
-    return self.pred
+class DirDist(td.Independent):
+    def __init__(self, mean, std):
+        norm_mean = F.normalize(mean.float(), p=2, dim=-1)
+        self.mean_tensor = norm_mean
+        self.std_tensor = std.float()
+        base = td.Normal(norm_mean, self.std_tensor)
+        super().__init__(base, 1)
 
-  def sample(self, sample_shape=(), seed=None):
-    return tf.broadcast_to(self.pred, sample_shape + self.pred.shape)
+    def sample(self, sample_shape=torch.Size(), seed=None):
+        sample = super().sample(sample_shape)
+        return F.normalize(sample, p=2, dim=-1)
 
-  def log_prob(self, value):
-    assert len(self.pred.shape) == len(value.shape), (
-        self.pred.shape, value.shape)
-    distance = ((self.pred - value) ** 2)
-    if self._agg == 'mean':
-      loss = distance.mean(self._axes)
-    elif self._agg == 'sum':
-      loss = distance.sum(self._axes)
-    else:
-      raise NotImplementedError(self._agg)
-    return -loss
-
-
-class CosineDist(tfd.Distribution):
-
-  def __init__(self, pred):
-    super().__init__(pred.dtype, tfd.FULLY_REPARAMETERIZED, False, True)
-    self.pred = tf.nn.l2_normalize(pred, -1)
-
-  @classmethod
-  def _parameter_properties(cls, dtype, num_classes=None):
-    return {'pred': tfp.util.ParameterProperties()}
-
-  def _batch_shape(self):
-    return self.pred.shape[:-1]
-
-  def _event_shape(self):
-    return self.pred.shape[-1:]
-
-  def mean(self):
-    return self.pred
-
-  def mode(self):
-    return self.pred
-
-  def sample(self, sample_shape=(), seed=None):
-    return tf.broadcast_to(self.pred, sample_shape + self.pred.shape)
-
-  def log_prob(self, value):
-    assert len(self.pred.shape) == len(value.shape), (
-        self.pred.shape, value.shape)
-    return tf.einsum('...i,...i->...', self.pred, value)
-
-
-class DirDist(tfd.MultivariateNormalDiag):
-
-  def __init__(self, mean, std):
-    self.mean = tf.nn.l2_normalize(mean.astype(tf.float32), -1)
-    self.std = std.astype(tf.float32)
-    super().__init__(self.mean, self.std)
-
-  @classmethod
-  def _parameter_properties(cls, dtype, num_classes=None):
-    return {k: tfp.util.ParameterProperties() for k in ('mean', 'std')}
-
-  def _batch_shape(self):
-    return self.mean.shape[:-1]
-
-  def _event_shape(self):
-    return self.mean.shape[-1:]
-
-  def sample(self, sample_shape=(), seed=None):
-    sample = super().sample(sample_shape, seed)
-    sample = tf.nn.l2_normalize(sample, -1)
-    return sample
-
-  def log_prob(self, value):
-    value = tf.nn.l2_normalize(value.astype(tf.float32), -1)
-    return super().log_prob(value)
-
+    def log_prob(self, value):
+        norm_value = F.normalize(value.float(), p=2, dim=-1)
+        return super().log_prob(norm_value)
 
 class SymlogDist:
+    def __init__(self, mode, dims, agg='sum'):
+        self._mode = mode
+        self._dims = dims  # number of event dimensions
+        self._agg = agg
+        self.batch_shape = mode.shape[:-dims]
+        self.event_shape = mode.shape[-dims:]
 
-  def __init__(self, mode, dims, agg='sum'):
-    self._mode = mode
-    self._dims = tuple([-x for x in range(1, dims + 1)])
-    self._agg = agg
-    self.batch_shape = mode.shape[:len(mode.shape) - dims]
-    self.event_shape = mode.shape[len(mode.shape) - dims:]
+    def mode(self):
+        return symexp(self._mode)
 
-  def mode(self):
-    return symexp(self._mode)
+    def mean(self):
+        return symexp(self._mode)
 
-  def mean(self):
-    return symexp(self._mode)
+    def log_prob(self, value):
+        assert self._mode.shape == value.shape, f"{self._mode.shape} vs {value.shape}"
+        distance = (self._mode - symlog(value)) ** 2
+        axes = tuple(-i for i in range(1, self._dims+1))
+        if self._agg == 'mean':
+            loss = distance.mean(dim=axes)
+        elif self._agg == 'sum':
+            loss = distance.sum(dim=axes)
+        else:
+            raise NotImplementedError(self._agg)
+        return -loss
 
-  def log_prob(self, value):
-    assert self._mode.shape == value.shape, (self._mode.shape, value.shape)
-    distance = (self._mode - symlog(value)) ** 2
-    if self._agg == 'mean':
-      loss = distance.mean(self._dims)
-    elif self._agg == 'sum':
-      loss = distance.sum(self._dims)
-    else:
-      raise NotImplementedError(self._agg)
-    return -loss
+class OneHotDist(td.OneHotCategorical):
+    def __init__(self, logits=None, probs=None, dtype=torch.float32):
+        super().__init__(logits=logits, probs=probs)
 
+    def mode(self):
+        _mode = F.one_hot(torch.argmax(self.logits, dim=-1), num_classes=self.logits.shape[-1])
+        return _mode.float() + self.logits - self.logits.detach()
 
-class OneHotDist(tfd.OneHotCategorical):
+    def sample(self, sample_shape=torch.Size(), seed=None):
+        if seed is not None:
+            raise ValueError("Seed not supported")
+        sample = super().sample(sample_shape).detach()
+        probs = self.probs
+        while probs.ndim < sample.ndim:
+            probs = probs.unsqueeze(0)
+        sample = sample + (probs - probs.detach())
+        return sample
 
-  def __init__(self, logits=None, probs=None, dtype=tf.float32):
-    super().__init__(logits, probs, dtype)
-
-  @classmethod
-  def _parameter_properties(cls, dtype, num_classes=None):
-     return super()._parameter_properties(dtype)
-
-  def sample(self, sample_shape=(), seed=None):
-    if not isinstance(sample_shape, (list, tuple)):
-      sample_shape = (sample_shape,)
-    logits = self.logits_parameter().astype(self.dtype)
-    shape = tuple(logits.shape)
-    logits = logits.reshape([np.prod(shape[:-1]), shape[-1]])
-    indices = tf.random.categorical(logits, np.prod(sample_shape), seed=None)
-    sample = tf.one_hot(indices, shape[-1], dtype=self.dtype)
-    if np.prod(sample_shape) != 1:
-      sample = sample.transpose((1, 0, 2))
-    sample = tf.stop_gradient(sample.reshape(sample_shape + shape))
-    # Straight through biased gradient estimator.
-    probs = self._pad(super().probs_parameter(), sample.shape)
-    sample += tf.cast(probs - tf.stop_gradient(probs), sample.dtype)
-    return sample
-
-  def _pad(self, tensor, shape):
-    while len(tensor.shape) < len(shape):
-      tensor = tensor[None]
-    return tensor
-
-
-def video_grid(video):
-  B, T, H, W, C = video.shape
-  return video.transpose((1, 2, 0, 3, 4)).reshape((T, H, B * W, C))
-
-
-def balance_stats(dist, target, thres):
-  # Values are NaN when there are no positives or negatives in the current
-  # batch, which means they will be ignored when aggregating metrics via
-  # np.nanmean() later, as they should.
-  pos = (target.astype(tf.float32) > thres).astype(tf.float32)
-  neg = (target.astype(tf.float32) <= thres).astype(tf.float32)
-  pred = (dist.mean().astype(tf.float32) > thres).astype(tf.float32)
-  loss = -dist.log_prob(target)
-  return dict(
-      pos_loss=(loss * pos).sum() / pos.sum(),
-      neg_loss=(loss * neg).sum() / neg.sum(),
-      pos_acc=(pred * pos).sum() / pos.sum(),
-      neg_acc=((1 - pred) * neg).sum() / neg.sum(),
-      rate=pos.mean(),
-      avg=target.astype(tf.float32).mean(),
-      pred=dist.mean().astype(tf.float32).mean(),
-  )
-
-
+# ---------------------------------------------------------------------------
+# AutoAdapt and Normalize
+# ---------------------------------------------------------------------------
 class AutoAdapt(Module):
+    def __init__(self, shape, impl, scale, target, min, max, vel=0.1, thres=0.1, inverse=False):
+        super().__init__()
+        self._shape = shape
+        self._impl = impl
+        self._target = target
+        self._min = min
+        self._max = max
+        self._vel = vel
+        self._inverse = inverse
+        self._thres = thres
+        if self._impl == 'fixed':
+            self._scale = tensor(scale)
+        elif self._impl in ['mult', 'prop']:
+            self._scale = nn.Parameter(torch.ones(shape, dtype=torch.float32), requires_grad=False)
+        else:
+            raise NotImplementedError(self._impl)
 
-  def __init__(
-      self, shape, impl, scale, target, min, max,
-      vel=0.1, thres=0.1, inverse=False):
-    self._shape = shape
-    self._impl = impl
-    self._target = target
-    self._min = min
-    self._max = max
-    self._vel = vel
-    self._inverse = inverse
-    self._thres = thres
-    if self._impl == 'fixed':
-      self._scale = tf.tensor(scale)
-    elif self._impl == 'mult':
-      self._scale = tf.Variable(tf.ones(shape, tf.float32), trainable=False)
-    elif self._impl == 'prop':
-      self._scale = tf.Variable(tf.ones(shape, tf.float32), trainable=False)
-    else:
-      raise NotImplementedError(self._impl)
+    def forward(self, reg, update=True):
+        if update:
+            self.update(reg)
+        scale = self.scale()
+        loss = scale * (-reg if self._inverse else reg)
+        metrics = {
+            'mean': reg.mean().item(),
+            'std': reg.std().item(),
+            'scale_mean': scale.mean().item(),
+            'scale_std': scale.std().item(),
+        }
+        return loss, metrics
 
-  def __call__(self, reg, update=True):
-    update and self.update(reg)
-    scale = self.scale()
-    loss = scale * (-reg if self._inverse else reg)
-    metrics = {
-        'mean': reg.mean(), 'std': reg.std(),
-        'scale_mean': scale.mean(), 'scale_std': scale.std()}
-    return loss, metrics
+    def scale(self):
+        return self._scale.detach()
 
-  def scale(self):
-    if self._impl == 'fixed':
-      scale = self._scale
-    elif self._impl == 'mult':
-      scale = self._scale
-    elif self._impl == 'prop':
-      scale = self._scale
-    else:
-      raise NotImplementedError(self._impl)
-    return tf.stop_gradient(tf.tensor(scale))
-
-  def update(self, reg):
-    avg = reg.mean(list(range(len(reg.shape) - len(self._shape))))
-    if self._impl == 'fixed':
-      pass
-    elif self._impl == 'mult':
-      below = avg < (1 / (1 + self._thres)) * self._target
-      above = avg > (1 + self._thres) * self._target
-      if self._inverse:
-        below, above = above, below
-      inside = ~below & ~above
-      adjusted = (
-          above.astype(tf.float32) * self._scale * (1 + self._vel) +
-          below.astype(tf.float32) * self._scale / (1 + self._vel) +
-          inside.astype(tf.float32) * self._scale)
-      self._scale.assign(tf.clip_by_value(adjusted, self._min, self._max))
-    elif self._impl == 'prop':
-      direction = avg - self._target
-      if self._inverse:
-        direction = -direction
-      self._scale.assign(tf.clip_by_value(
-          self._scale + self._vel * direction, self._min, self._max))
-    else:
-      raise NotImplementedError(self._impl)
-
+    def update(self, reg):
+        dims = len(reg.shape) - len(self._shape)
+        avg = reg.mean(dim=tuple(range(dims))) if dims > 0 else reg
+        if self._impl == 'fixed':
+            return
+        elif self._impl == 'mult':
+            below = (avg < (1 / (1 + self._thres)) * self._target).float()
+            above = (avg > (1 + self._thres) * self._target).float()
+            if self._inverse:
+                below, above = above, below
+            inside = 1.0 - (below + above)
+            adjusted = (above * self._scale * (1 + self._vel) +
+                        below * self._scale / (1 + self._vel) +
+                        inside * self._scale)
+            self._scale.data.copy_(torch.clamp(adjusted, self._min, self._max))
+        elif self._impl == 'prop':
+            direction = avg - self._target
+            if self._inverse:
+                direction = -direction
+            self._scale.data.copy_(torch.clamp(self._scale + self._vel * direction, self._min, self._max))
+        else:
+            raise NotImplementedError(self._impl)
 
 class Normalize:
+    def __init__(self, impl='mean_std', decay=0.99, max_val=1e8, vareps=0.0, stdeps=0.0):
+        self._impl = impl
+        self._decay = decay
+        self._max = max_val
+        self._stdeps = stdeps
+        self._vareps = vareps
+        self._mean = torch.tensor(0.0, dtype=torch.float64)
+        self._sqrs = torch.tensor(0.0, dtype=torch.float64)
+        self._step = 0
 
-  def __init__(
-      self, impl='mean_std', decay=0.99, max=1e8, vareps=0.0, stdeps=0.0):
-    self._impl = impl
-    self._decay = decay
-    self._max = max
-    self._stdeps = stdeps
-    self._vareps = vareps
-    self._mean = tf.Variable(0.0, trainable=False, dtype=tf.float64)
-    self._sqrs = tf.Variable(0.0, trainable=False, dtype=tf.float64)
-    self._step = tf.Variable(0, trainable=False, dtype=tf.int64)
+    def __call__(self, values, update=True):
+        if update:
+            self.update(values)
+        return self.transform(values)
 
-  def __call__(self, values, update=True):
-    update and self.update(values)
-    return self.transform(values)
+    def update(self, values):
+        x = values.to(torch.float64)
+        self._step += 1
+        self._mean = self._decay * self._mean + (1 - self._decay) * x.mean().double()
+        self._sqrs = self._decay * self._sqrs + (1 - self._decay) * (x ** 2).mean().double()
 
-  def update(self, values):
-    x = values.astype(tf.float64)
-    m = self._decay
-    self._step.assign_add(1)
-    self._mean.assign(m * self._mean + (1 - m) * x.mean())
-    self._sqrs.assign(m * self._sqrs + (1 - m) * (x ** 2).mean())
+    def transform(self, values):
+        correction = 1 - self._decay ** self._step
+        mean = self._mean / correction
+        var = (self._sqrs / correction) - mean ** 2
+        if self._max > 0.0:
+            scale = torch.rsqrt(torch.clamp(var, min=1 / (self._max ** 2) + self._vareps) + self._stdeps)
+        else:
+            scale = torch.rsqrt(var + self._vareps) + self._stdeps
+        if self._impl == 'off':
+            return values
+        elif self._impl == 'mean_std':
+            return (values - mean.to(values.dtype)) * scale.to(values.dtype)
+        elif self._impl == 'std':
+            return values * scale.to(values.dtype)
+        else:
+            raise NotImplementedError(self._impl)
 
-  def transform(self, values):
-    correction = 1 - self._decay ** self._step.astype(tf.float64)
-    mean = self._mean / correction
-    var = (self._sqrs / correction) - mean ** 2
-    if self._max > 0.0:
-      scale = tf.math.rsqrt(
-          tf.maximum(var, 1 / self._max ** 2 + self._vareps) + self._stdeps)
+# ---------------------------------------------------------------------------
+# Input and get_act
+# ---------------------------------------------------------------------------
+class Input(Module):
+    def __init__(self, keys=['tensor'], dims=None):
+        super().__init__()
+        assert isinstance(keys, (list, tuple)), keys
+        self._keys = tuple(keys)
+        self._dims = dims or self._keys[0]
+
+    def forward(self, inputs):
+        if not isinstance(inputs, dict):
+            inputs = {'tensor': inputs}
+        if not all(k in inputs for k in self._keys):
+            needs = f'{{{", ".join(self._keys)}}}'
+            found = f'{{{", ".join(inputs.keys())}}}'
+            raise KeyError(f'Cannot find keys {needs} among inputs {found}.')
+        values = [inputs[k] for k in self._keys]
+        dims = len(inputs[self._dims].shape)
+        new_vals = []
+        for value in values:
+            if value.dim() > dims:
+                new_shape = list(value.shape[:dims - 1]) + [int(np.prod(value.shape[dims - 1:]))]
+                value = value.view(*new_shape)
+            new_vals.append(value.to(inputs[self._dims].dtype))
+        return torch.cat(new_vals, dim=-1)
+
+def get_act(name):
+    if callable(name):
+        return name
+    elif name == 'none':
+        return lambda x: x
+    elif name == 'mish':
+        return lambda x: x * torch.tanh(F.softplus(x))
+    elif name == 'gelu':
+        return F.gelu
+    elif hasattr(F, name):
+        return getattr(F, name)
+    elif hasattr(torch, name):
+        return getattr(torch, name)
     else:
-      scale = tf.math.rsqrt(var + self._vareps) + self._stdeps
-    if self._impl == 'off':
-      pass
-    elif self._impl == 'mean_std':
-      values -= mean.astype(values.dtype)
-      values *= scale.astype(values.dtype)
-    elif self._impl == 'std':
-      values *= scale.astype(values.dtype)
-    else:
-      raise NotImplementedError(self._impl)
-    return values
+        raise NotImplementedError(name)
