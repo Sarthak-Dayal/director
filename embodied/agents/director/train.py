@@ -2,6 +2,8 @@ import pathlib
 import sys
 import warnings
 
+import torch
+
 warnings.filterwarnings('ignore', '.*box bound precision lowered.*')
 warnings.filterwarnings('ignore', '.*using stateful random seeds*')
 warnings.filterwarnings('ignore', '.*is a deprecated alias for.*')
@@ -23,6 +25,7 @@ def main(argv=None):
   from . import agent_torch as agnt
   from . import train_with_viz
 
+  torch.autograd.set_detect_anomaly(True)
   parsed, other = embodied.Flags(
       configs=['defaults'], actor_id=0, actors=0,
   ).parse_known(argv)

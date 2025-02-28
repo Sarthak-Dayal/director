@@ -38,7 +38,7 @@ class Disag(tfutils.Module):  # tfutils.Module is assumed to be a subclass of nn
         self._build(traj)
         inp = self.inputs(traj)
         # For each head, assume calling head(inp) returns a distribution with a mode() method.
-        preds = [head(inp).mode() for head in self.nets_torch]
+        preds = [head(inp).mode for head in self.nets_torch]
         # Stack predictions along a new dimension and compute std across models then average over the last dim.
         stacked = torch.stack(preds, dim=0)
         disag = torch.std(stacked, dim=0).mean(dim=-1)
@@ -63,8 +63,7 @@ class Disag(tfutils.Module):  # tfutils.Module is assumed to be a subclass of nn
         for head in self.nets_torch:
             pred_dist = head(inp)
             loss = loss - pred_dist.log_prob(target).mean()
-        loss.backward()
-        self.opt.step(self.nets_torch)
+        self.opt.step(loss, self.nets_torch)
         # Optionally, you can return loss.item() or a dictionary of metrics.
         return {'disag_loss': loss.item()}
 
@@ -121,8 +120,7 @@ class LatentVAE(tfutils.Module):
         ll = self.dec(self.flatten(sample)).log_prob(target)
         assert kl.shape == ll.shape, "Shape mismatch between KL and log-likelihood"
         loss = (kl - ll).mean()
-        loss.backward()
-        self.opt.step([self.enc, self.dec])
+        self.opt.step(loss, [self.enc, self.dec])
         metrics['vae_kl'] = kl.mean().item()
         metrics['vae_ll'] = ll.mean().item()
         metrics['vae_loss'] = loss.item()
@@ -149,13 +147,12 @@ class CtrlDisag(tfutils.Module):
         metrics = {}
         self.opt.optimizer.zero_grad()
         # Embed the data and extract the mode of the distribution.
-        ctrl = self.embed(data).mode()
+        ctrl = self.embed(data).mode
         # Build a distribution over actions using the embedded "current" and "next" features.
         # Here we assume that self.head accepts a dict input.
         dist = self.head({'current': ctrl[:, :-1], 'next': ctrl[:, 1:]})
         loss = -dist.log_prob(data['action'][:, 1:]).mean()
-        loss.backward()
-        self.opt.step([self.embed, self.head])
+        self.opt.step(loss, [self.embed, self.head])
         metrics['ctrl_loss'] = loss.item()
         # Also train the underlying disag module using the embedded ctrl features.
         new_data = dict(data)

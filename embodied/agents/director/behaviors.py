@@ -75,7 +75,7 @@ class Explore(tfutils.Module):
                 continue
             if key == 'extr':
                 # For extrinsic reward, use the reward head from the world model.
-                reward = lambda traj: wm.heads['reward'](traj).mean()[1:]
+                reward = lambda traj: wm.heads['reward'](traj).mean[1:]
                 critics[key] = agent_torch.VFunction(reward, config)
             else:
                 reward = self.REWARDS[key](wm, act_space, config)

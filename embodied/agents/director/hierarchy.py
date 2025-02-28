@@ -10,7 +10,7 @@ from . import agent_torch
 from . import expl
 from . import nets_torch
 from . import tfutils
-from tfutils import map_structure, tensor, scan  # our helper functions
+from tfutils import map_structure, tensor, scan, recursive_detach  # our helper functions
 
 
 # ----------------------------------------------------------------------------
@@ -21,7 +21,7 @@ class Hierarchy(tfutils.Module):
         super().__init__()
         self.wm = wm
         self.config = config
-        self.extr_reward = lambda traj: self.wm.heads['reward'](traj).mean()[1:]
+        self.extr_reward = lambda traj: self.wm.heads['reward'](traj).mean[1:]
         self.skill_space = embodied.Space(
             np.int32 if config.goal_encoder.dist == 'onehot' else np.float32,
             config.skill_shape)
@@ -97,7 +97,7 @@ class Hierarchy(tfutils.Module):
                 torch.einsum('i,i...->i...', update.float(), y)
         )
         skill = sg(switch(carry['skill'], self.manager.actor(sg(latent)).sample()))
-        new_goal = self.dec({'skill': skill, 'context': self.feat(latent)}).mode()
+        new_goal = self.dec({'skill': skill, 'context': self.feat(latent)}).mode
         new_goal = (self.feat(latent).to(torch.float32) + new_goal) if self.config.manager_delta else new_goal
         goal = sg(switch(carry['goal'], new_goal))
         delta = goal - self.feat(latent).to(torch.float32)
@@ -109,7 +109,7 @@ class Hierarchy(tfutils.Module):
             dec_out = self.wm.heads['decoder']({
                 'deter': goal, 'stoch': self.wm.rssm.get_stoch(goal)
             })
-            outs['log_goal'] = dec_out['image'].mode()
+            outs['log_goal'] = dec_out['image'].mode
         new_step = carry['step'] + 1
         new_carry = {'step': new_step, 'skill': skill, 'goal': goal}
         return outs, new_carry
@@ -168,11 +168,12 @@ class Hierarchy(tfutils.Module):
             traj['reward_expl'] = self.expl_reward(traj)
             traj['reward_goal'] = self.goal_reward(traj)
             traj['delta'] = traj['goal'] - self.feat(traj).to(torch.float32)
+            traj = recursive_detach(traj)
             wtraj = self.split_traj(traj)
             mtraj = self.abstract_traj(traj)
-        worker_mets = self.worker.update(wtraj, tape=None)
+        worker_mets = self.worker.update(wtraj)
         metrics.update({f'worker_{k}': v for k, v in worker_mets.items()})
-        manager_mets = self.manager.update(mtraj, tape=None)
+        manager_mets = self.manager.update(mtraj)
         metrics.update({f'manager_{k}': v for k, v in manager_mets.items()})
         return traj, metrics
 
@@ -183,7 +184,7 @@ class Hierarchy(tfutils.Module):
         context = self.feat(start)
         with torch.enable_grad():
             skill = self.manager.actor(sg(start)).sample()
-            goal = self.dec({'skill': skill, 'context': context}).mode()
+            goal = self.dec({'skill': skill, 'context': context}).mode
             goal = (self.feat(start).to(torch.float32) + goal) if self.config.manager_delta else goal
             worker = lambda s: self.worker.actor(
                 sg({**s, 'goal': goal, 'delta': goal - self.feat(s).to(torch.float32)})).sample()
@@ -299,17 +300,17 @@ class Hierarchy(tfutils.Module):
         if impl == 'replay':
             target = feat[torch.randperm(feat.shape[0])]
             skill = self.enc({'goal': target, 'context': feat}).sample()
-            return self.dec({'skill': skill, 'context': feat}).mode()
+            return self.dec({'skill': skill, 'context': feat}).mode
         elif impl == 'replay_direct':
             return feat[torch.randperm(feat.shape[0])].to(torch.float32)
         elif impl == 'manager':
             skill = self.manager.actor(start).sample()
-            goal = self.dec({'skill': skill, 'context': feat}).mode()
+            goal = self.dec({'skill': skill, 'context': feat}).mode
             goal = feat + goal if self.config.manager_delta else goal
             return goal
         elif impl == 'prior':
-            skill = self.prior.sample(len(start['is_terminal']))
-            return self.dec({'skill': skill, 'context': feat}).mode()
+            skill = self.prior.sample((len(start['is_terminal']),))
+            return self.dec({'skill': skill, 'context': feat}).mode
         else:
             raise NotImplementedError(impl)
 
@@ -317,7 +318,7 @@ class Hierarchy(tfutils.Module):
         feat = self.feat(traj).to(torch.float32)
         goal = traj['goal'].to(torch.float32).detach()
         skill = traj['skill'].to(torch.float32).detach()
-        context = feat[0].unsqueeze(0).repeat(1 + self.config.imag_horizon, 1)
+        context = feat[0].unsqueeze(0).repeat(1 + self.config.imag_horizon, *([1] * feat[0].dim()))
         if self.config.goal_reward == 'dot':
             return torch.einsum('...i,...i->...', goal, feat)[1:]
         elif self.config.goal_reward == 'dir':
@@ -402,22 +403,44 @@ class Hierarchy(tfutils.Module):
             raise NotImplementedError(self.config.goal_reward)
 
     def elbo_reward(self, traj):
-        feat = self.feat(traj).to(torch.float32)
-        context = feat[0].unsqueeze(0).repeat(1 + self.config.imag_horizon, 1)
+        # Convert the features to float (PyTorch default is float32)
+        feat = self.feat(traj).float()
+
+        # Create the context by repeating feat[0] along a new batch dimension.
+        # feat[0] has shape (D1, D2, ...); unsqueeze(0) adds a new dimension at the front.
+        # We then repeat it 1 + self.config.imag_horizon times along that dimension.
+        # For a tensor with ndim N, after unsqueeze it has ndim N+1, and we want to
+        # repeat only along the first dimension.
+        context = feat[0].unsqueeze(0).repeat(1 + self.config.imag_horizon, *([1] * feat[0].dim()))
+
+        # Pass the features and context into your encoder
         enc = self.enc({'goal': feat, 'context': context})
-        dec = self.dec({'skill': enc.sample(), 'context': context})
+
+        # Sample a skill from the encoder's distribution
+        skill = enc.sample()
+
+        # Pass the sampled skill and context into your decoder
+        dec = self.dec({'skill': skill, 'context': context})
+
+        # Compute log likelihood and KL divergence.
         ll = dec.log_prob(feat)
-        kl = td.kl_divergence(enc, self.prior)
+        kl = torch.distributions.kl_divergence(enc, self.prior)
+
+        # Compute the reward based on the adversarial implementation option.
         if self.config.adver_impl == 'abs':
-            return (dec.mode() - feat).abs().mean(dim=-1)[1:]
+            # Absolute difference between decoder's mode and features, mean over last dimension.
+            reward = torch.abs(dec.mode() - feat).mean(dim=-1)[1:]
         elif self.config.adver_impl == 'squared':
-            return ((dec.mode() - feat) ** 2).mean(dim=-1)[1:]
+            # Squared difference between decoder's mode and features, mean over last dimension.
+            reward = ((dec.mode - feat) ** 2).mean(dim=-1)[1:]
         elif self.config.adver_impl == 'elbo_scaled':
-            return (kl - ll / self.kl.scale())[1:]
+            reward = (kl - ll / self.kl.scale())[1:]
         elif self.config.adver_impl == 'elbo_unscaled':
-            return (kl - ll)[1:]
+            reward = (kl - ll)[1:]
         else:
             raise NotImplementedError(self.config.adver_impl)
+
+        return reward
 
     def split_traj(self, traj):
         traj = traj.copy()
@@ -447,16 +470,25 @@ class Hierarchy(tfutils.Module):
         traj = traj.copy()
         traj['action'] = traj.pop('skill')
         k = self.config.train_skill_duration
-        reshaped = lambda x: x[:-1].view(x.shape[0] // k, k, *x.shape[1:])
-        weights = torch.cumprod(reshaped(traj['cont'][:-1]), dim=1)
+        # Define a reshape function to group the first dimension into groups of size k.
+        reshape = lambda x: x.reshape(x.shape[0] // k, k, *x.shape[1:])
+
+        # Compute cumulative product along axis=1 after reshaping the 'cont' tensor (excluding the last timestep)
+        weights = torch.cumprod(reshape(traj['cont'][:-1]), dim=1)
+
         for key, value in list(traj.items()):
             if 'reward' in key:
-                traj[key] = reshaped(value) * weights
-                traj[key] = traj[key].mean(dim=1)
+                # Reshape the tensor, multiply by weights and take the mean over the grouped axis.
+                traj[key] = (reshape(value) * weights).mean(dim=1)
             elif key == 'cont':
-                traj[key] = torch.cat([value[:1], reshaped(value[1:]).prod(dim=1)], dim=0)
+                # For the 'cont' key, concatenate the first timestep with the product over each group of timesteps.
+                traj[key] = torch.cat([value[:1], reshape(value[1:]).prod(dim=1)], dim=0)
             else:
-                traj[key] = torch.cat([reshaped(value)[:, 0], value[-1:]], dim=0)
+                # For other keys, reshape and select the first element of each group, then concat with the last timestep.
+                traj[key] = torch.cat([reshape(value[:-1])[:, 0], value[-1:]], dim=0)
+
+        # Compute cumulative product of discount-scaled continuation probabilities,
+        # then scale it back by dividing by the discount.
         traj['weight'] = torch.cumprod(self.config.discount * traj['cont'], dim=0) / self.config.discount
         return traj
 
@@ -500,11 +532,11 @@ class Hierarchy(tfutils.Module):
                 continue
             length = 1 + self.config.worker_report_horizon
             rows = []
-            rows.append(initial[k].mode().unsqueeze(1).repeat(1, length, 1, 1, 1))
+            rows.append(initial[k].mode.unsqueeze(1).repeat(1, length, 1, 1, 1))
             if target is not None:
-                rows.append(target[k].mode().unsqueeze(1).repeat(1, length, 1, 1, 1))
+                rows.append(target[k].mode.unsqueeze(1).repeat(1, length, 1, 1, 1))
             # For rollout, transpose to have time first.
-            r = rollout[k].mode().permute(1, 0, 2, 3, 4)
+            r = rollout[k].mode.permute(1, 0, 2, 3, 4)
             rows.append(r)
             videos[k] = tfutils.video_grid(torch.cat(rows, dim=2))
         return videos

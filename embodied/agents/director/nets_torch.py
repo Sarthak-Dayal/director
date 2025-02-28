@@ -237,7 +237,7 @@ class MultiDecoder(Module):
         if self.cnn_shapes:
             flat = features.view(-1, features.shape[-1])
             output = self._cnn(flat)
-            output = output.view(*features.shape[:-1], output.shape[-1])
+            output = output.view(*features.shape[:-1], *output.shape[1:])
             splits = [v[-1] for v in self.cnn_shapes.values()]
             means = torch.split(output, splits, dim=-1)
             for key, mean in zip(self.cnn_shapes.keys(), means):
@@ -290,7 +290,7 @@ class ImageDecoderSimple(Module):
         for i, kernel in enumerate(self._kernels[:-1]):
             x = self.get(f'conv{i}', Conv2D, depth, kernel, transp=True, stride=2, pad='valid', **self._kw)(x)
             depth //= 2
-        x = self.get('out', Conv2D, self._shape[-1], self._kernels[-1], transp=True)(x)
+        x = self.get('out', Conv2D, self._shape[-1], self._kernels[-1], stride=2, pad='valid', transp=True, **self._kw)(x)
         x = torch.sigmoid(x)
         assert x.shape[-3:] == self._shape, f"{x.shape[-3:]} vs {self._shape}"
         return x
@@ -354,6 +354,7 @@ class DistLayer(Module):
             kw['weight_init'] = 'zeros'
         else:
             kw['weight_init'] = 'variance_scaling'
+            kw['outscale'] = self._outscale
         out = self.get('out', Dense, int(np.prod(self._shape)), **kw)(inputs)
         new_shape = list(inputs.shape[:-1]) + list(self._shape)
         out = out.view(*new_shape).to(torch.float32)
@@ -446,17 +447,31 @@ class Conv2D(Module):
 # Dense
 # ---------------------------
 class Dense(Module):
-    def __init__(self, units, act='none', norm='none', bias=True):
+    def __init__(self, units, act='none', norm='none', bias=True, **kwargs):
         super().__init__()
         self._units = units
         self.act = get_act(act)
         self.norm_impl = norm
         self.bias = bias
         self.linear = None
+        self.kw = kwargs
+
 
     def forward(self, x):
+
         if self.linear is None:
             self.linear = self.get('linear', nn.Linear, x.shape[-1], self._units, bias=self.bias)
+
+            def weight_init(m):
+                if isinstance(m, nn.Linear):
+                    if self.kw['weight_init'] == 'zeros':
+                        nn.init.zeros_(m.weight)
+                    else:
+                        nn.init.xavier_uniform_(m.weight, gain=self.kw['outscale'])
+
+            if 'weight_init' in self.kw:
+                self.linear.apply(weight_init)
+
         x = self.linear(x)
         norm_layer = self.get('norm', Norm, self.norm_impl)
         x = norm_layer(x)

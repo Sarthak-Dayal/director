@@ -38,6 +38,19 @@ def stack_nested(nested_list, dim=0):
     else:
         return torch.stack(nested_list, dim=dim)
 
+def recursive_detach(obj):
+    if torch.is_tensor(obj):
+        return obj.detach()
+    elif isinstance(obj, dict):
+        return {k: recursive_detach(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [recursive_detach(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(recursive_detach(item) for item in obj)
+    # Extend with other types (e.g., sets) if needed.
+    else:
+        return obj
+
 def shuffle(x, axis):
     """Shuffle the tensor x along the specified axis."""
     perm = list(range(x.ndim))
@@ -143,20 +156,32 @@ def video_grid(video):
     return video.reshape(T, H, B * W, C)
 
 def balance_stats(dist, target, thres):
-    """Compute balanced loss and accuracy statistics."""
+    # Convert target to float32.
     target = target.to(torch.float32)
+    # Identify positive and negative examples.
     pos = (target > thres).to(torch.float32)
     neg = (target <= thres).to(torch.float32)
-    pred = (dist.mean().to(torch.float32) > thres).to(torch.float32)
+    # Compute the prediction from the distribution's mean.
+    pred = (dist.mean.to(torch.float32) > thres).to(torch.float32)
+    # Compute loss as negative log probability.`
     loss = -dist.log_prob(target)
+    # Calculate metrics; note that divisions by zero will yield NaN,
+    # which is acceptable as they are ignored in later aggregation.
+    pos_loss = (loss * pos).sum() / pos.sum()
+    neg_loss = (loss * neg).sum() / neg.sum()
+    pos_acc = (pred * pos).sum() / pos.sum()
+    neg_acc = ((1 - pred) * neg).sum() / neg.sum()
+    rate = pos.mean()
+    avg = target.mean()
+    pred_mean = dist.mean.to(torch.float32).mean()
     return dict(
-        pos_loss=(loss * pos).sum() / pos.sum(),
-        neg_loss=(loss * neg).sum() / neg.sum(),
-        pos_acc=(pred * pos).sum() / pos.sum(),
-        neg_acc=((1 - pred) * neg).sum() / neg.sum(),
-        rate=pos.mean(),
-        avg=target.mean(),
-        pred=dist.mean().mean(),
+        pos_loss=pos_loss,
+        neg_loss=neg_loss,
+        pos_acc=pos_acc,
+        neg_acc=neg_acc,
+        rate=rate,
+        avg=avg,
+        pred=pred_mean,
     )
 
 # ---------------------------------------------------------------------------
@@ -285,26 +310,11 @@ class Optimizer(Module):
         video = video.permute(1, 2, 0, 3, 4)
         return video.reshape(T, H, B * W, C)
 
-    @staticmethod
-    def balance_stats(dist, target, thres):
-        target = target.to(torch.float32)
-        pos = (target > thres).to(torch.float32)
-        neg = (target <= thres).to(torch.float32)
-        pred = (dist.mean().to(torch.float32) > thres).to(torch.float32)
-        loss = -dist.log_prob(target)
-        return dict(
-            pos_loss=(loss * pos).sum() / pos.sum(),
-            neg_loss=(loss * neg).sum() / neg.sum(),
-            pos_acc=(pred * pos).sum() / pos.sum(),
-            neg_acc=((1 - pred) * neg).sum() / neg.sum(),
-            rate=pos.mean(),
-            avg=target.mean(),
-            pred=dist.mean().mean(),
-        )
-
 # ---------------------------------------------------------------------------
 # Distribution Classes (wrappers)
 # ---------------------------------------------------------------------------
+
+# Mean-squared error distribution
 class MSEDist(td.Distribution):
     arg_constraints = {}
     support = td.constraints.real
@@ -313,7 +323,7 @@ class MSEDist(td.Distribution):
     def __init__(self, pred, dims, agg='sum'):
         self.pred = pred
         self._dims = dims
-        self._axes = tuple(-i for i in range(1, dims+1))
+        self._axes = tuple(-i for i in range(1, dims + 1))
         self._agg = agg
 
     @property
@@ -324,9 +334,11 @@ class MSEDist(td.Distribution):
     def event_shape(self):
         return self.pred.shape[-self._dims:] if self._dims > 0 else torch.Size()
 
+    @property
     def mean(self):
         return self.pred
 
+    @property
     def mode(self):
         return self.pred
 
@@ -344,6 +356,7 @@ class MSEDist(td.Distribution):
             raise NotImplementedError(self._agg)
         return -loss
 
+# Cosine similarity based distribution
 class CosineDist(td.Distribution):
     arg_constraints = {}
     support = td.constraints.real
@@ -360,9 +373,11 @@ class CosineDist(td.Distribution):
     def event_shape(self):
         return self.pred.shape[-1:]
 
+    @property
     def mean(self):
         return self.pred
 
+    @property
     def mode(self):
         return self.pred
 
@@ -373,13 +388,23 @@ class CosineDist(td.Distribution):
         assert self.pred.shape == value.shape, f"{self.pred.shape} vs {value.shape}"
         return (self.pred * value).sum(dim=-1)
 
+# Directional distribution built on a Normal then wrapped as an Independent distribution.
 class DirDist(td.Independent):
     def __init__(self, mean, std):
         norm_mean = F.normalize(mean.float(), p=2, dim=-1)
-        self.mean_tensor = norm_mean
+        self._mean = norm_mean
         self.std_tensor = std.float()
         base = td.Normal(norm_mean, self.std_tensor)
         super().__init__(base, 1)
+
+    @property
+    def mean(self):
+        return self._mean
+
+    @property
+    def mode(self):
+        # For a Normal distribution, the mode equals the mean.
+        return self._mean
 
     def sample(self, sample_shape=torch.Size(), seed=None):
         sample = super().sample(sample_shape)
@@ -389,6 +414,7 @@ class DirDist(td.Independent):
         norm_value = F.normalize(value.float(), p=2, dim=-1)
         return super().log_prob(norm_value)
 
+# Symlog distribution; assumes symexp and symlog are defined elsewhere.
 class SymlogDist:
     def __init__(self, mode, dims, agg='sum'):
         self._mode = mode
@@ -397,16 +423,18 @@ class SymlogDist:
         self.batch_shape = mode.shape[:-dims]
         self.event_shape = mode.shape[-dims:]
 
-    def mode(self):
+    @property
+    def mean(self):
         return symexp(self._mode)
 
-    def mean(self):
+    @property
+    def mode(self):
         return symexp(self._mode)
 
     def log_prob(self, value):
         assert self._mode.shape == value.shape, f"{self._mode.shape} vs {value.shape}"
         distance = (self._mode - symlog(value)) ** 2
-        axes = tuple(-i for i in range(1, self._dims+1))
+        axes = tuple(-i for i in range(1, self._dims + 1))
         if self._agg == 'mean':
             loss = distance.mean(dim=axes)
         elif self._agg == 'sum':
@@ -415,12 +443,21 @@ class SymlogDist:
             raise NotImplementedError(self._agg)
         return -loss
 
+# One-hot categorical distribution with a custom mode and sample behavior.
 class OneHotDist(td.OneHotCategorical):
     def __init__(self, logits=None, probs=None, dtype=torch.float32):
         super().__init__(logits=logits, probs=probs)
+        self._dtype = dtype
 
+    @property
+    def mean(self):
+        # Returning the probability vector as the mean.
+        return self.probs
+
+    @property
     def mode(self):
         _mode = F.one_hot(torch.argmax(self.logits, dim=-1), num_classes=self.logits.shape[-1])
+        # The "straight-through" trick: add the difference between logits and their detached version.
         return _mode.float() + self.logits - self.logits.detach()
 
     def sample(self, sample_shape=torch.Size(), seed=None):

@@ -155,20 +155,22 @@ class TensorBoardOutput(AsyncOutput):
     self._writer = None
 
   def _write(self, summaries):
-    import tensorflow as tf
+    from torch.utils.tensorboard import SummaryWriter
     if not self._writer:
-      self._writer = tf.summary.create_file_writer(
-          self._logdir, max_queue=1000)
-    self._writer.set_as_default()
+      self._writer = SummaryWriter(log_dir=self._logdir, max_queue=1000)
+    # self._writer.set_as_default()
     for step, name, value in summaries:
       if len(value.shape) == 0:
-        tf.summary.scalar(name, value, step)
+        self._writer.add_scalar(name, value, step)
       elif len(value.shape) == 2:
-        tf.summary.image(name, value, step)
+        self._writer.add_image(name, value, step)
       elif len(value.shape) == 3:
-        tf.summary.image(name, value, step)
+        self._writer.add_image(name, value, step)
       elif len(value.shape) == 4:
-        self._video_summary(name, value, step)
+        # self._video_summary(name, value, step)
+        self._writer.add_video(name, value[None], step, 16)
+      elif len(value.shape) == 5:
+        self._writer.add_video(name, value, step, 16)
     self._writer.flush()
 
   def _video_summary(self, name, video, step):

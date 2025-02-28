@@ -8,7 +8,8 @@ from torch.utils.data import IterableDataset, DataLoader
 
 import embodied
 
-from tfutils import Optimizer
+from tfutils import Optimizer, balance_stats, Module, scan
+from .tfutils import recursive_detach
 
 
 # Dummy implementations for helper functions and modules.
@@ -21,9 +22,6 @@ def action_noise(action, noise, act_space):
         return action + torch.randn_like(action) * noise
     return action
 
-def balance_stats(dist, target, weight):
-    diff = dist.mean() - target.mean()
-    return {'mean': diff.item(), 'std': (dist.std() - target.std()).item()}
 
 def video_grid(video):
     # Dummy implementation: in practice, format the tensor as a grid of videos.
@@ -116,7 +114,7 @@ class Agent(tfagent.TFAgent):
         if mode == 'eval':
             noise = self.config.eval_noise
             outs, task_state = self.task_behavior.policy(latent, task_state)
-            outs['action'] = outs['action'].mode()  # Assume distribution API
+            outs['action'] = outs['action'].mode  # Assume distribution API
         elif mode == 'explore':
             outs, expl_state = self.expl_behavior.policy(latent, expl_state)
             outs['action'] = outs['action'].sample()
@@ -194,7 +192,7 @@ class Agent(tfagent.TFAgent):
 # WorldModel and related modules
 # =============================================================================
 
-class WorldModel(nn.Module):
+class WorldModel(Module):
     def __init__(self, obs_space, config):
         super().__init__()
         # Extract shapes from the observation space.
@@ -214,9 +212,10 @@ class WorldModel(nn.Module):
     def train(self, data, state=None):
         super(WorldModel, self).train()  # set module to training mode
         loss, state, outputs, metrics = self.loss(data, state, training=True)
-        self.model_opt.zero_grad()
-        loss.backward()
-        self.model_opt.step()
+        modules = [self.encoder, self.rssm, *self.heads.values()]
+        self.model_opt.step(loss, modules)
+        state = recursive_detach(state)
+        outputs = recursive_detach(outputs)
         return state, outputs, metrics
 
     def loss(self, data, state=None, training=False):
@@ -266,25 +265,35 @@ class WorldModel(nn.Module):
         return model_loss.mean(), last_state, out, metrics
 
     def imagine(self, policy, start, horizon):
-        first_cont = (1.0 - start['is_terminal'].to(torch.float32))
+        # Compute continuation mask as float tensor.
+        first_cont = (1.0 - start['is_terminal']).float()
+        # Only keep keys present in the initial state.
         keys = list(self.rssm.initial(1).keys())
         start = {k: v for k, v in start.items() if k in keys}
         start['action'] = policy(start)
-        # Use a Python loop instead of tf.scan.
-        traj_lists = {k: [start[k]] for k in self.rssm.initial(1).keys()}
-        traj_lists['action'] = []
-        state = start
-        for _ in range(self.config.imag_unroll):
-            action = state.pop('action')
-            state = self.rssm.img_step(state, action)
+
+        def step(prev, _):
+            prev = prev.copy()
+            # Pop the previous action.
+            action = prev.pop('action')
+            # Perform one imaginated step using the RSSM.
+            state = self.rssm.img_step(prev, action)
+            # Compute next action from policy.
             action = policy(state)
-            state['action'] = action
-            for k, v in state.items():
-                traj_lists.setdefault(k, []).append(v)
-        traj = {k: torch.cat([v[None] if v.dim() == 0 else v for v in vs], dim=0)
-                for k, vs in traj_lists.items()}
-        cont_mean = self.heads['cont'](traj).mean()[1:]
-        traj['cont'] = torch.cat([first_cont.unsqueeze(0), cont_mean], dim=0)
+            return {**state, 'action': action}
+
+        # Use the pytorch version of tfutils.scan.
+        traj = scan(
+            step, torch.arange(horizon), start, self.config.imag_unroll
+        )
+        # Concatenate the initial state to the beginning of each trajectory.
+        traj = {k: torch.cat([start[k].unsqueeze(0), v], dim=0) for k, v in traj.items()}
+        # Compute the continuation values: first element is first_cont, then the mean from heads.
+        traj['cont'] = torch.cat([
+            first_cont.unsqueeze(0),
+            self.heads['cont'](traj).mean[1:]
+        ], dim=0)
+        # Compute trajectory weights using cumulative product of discounted continuation values.
         traj['weight'] = torch.cumprod(self.config.discount * traj['cont'], dim=0) / self.config.discount
         return traj
 
@@ -315,7 +324,7 @@ class WorldModel(nn.Module):
         traj = {**transp(states), **transp(carries), 'action': actions}
         for k, v in traj.items():
             traj[k] = torch.stack(v, dim=0)
-        cont = self.heads['cont'](traj).mean()
+        cont = self.heads['cont'](traj).mean
         cont = torch.cat([first_cont.unsqueeze(0), cont[1:]], dim=0)
         traj['cont'] = cont
         traj['weight'] = torch.cumprod(self.config.imag_discount * cont, dim=0) / self.config.imag_discount
@@ -334,7 +343,7 @@ class WorldModel(nn.Module):
         openl = self.heads['decoder'](self.rssm.imagine(data['action'][:6, 5:], start))
         for key in self.heads['decoder'].cnn_shapes.keys():
             truth = data[key][:6].to(torch.float32)
-            model = torch.cat([recon[key].mode()[:, :5], openl[key].mode()], dim=1)
+            model = torch.cat([recon[key].mode[:, :5], openl[key].mode], dim=1)
             error = (model - truth + 1) / 2
             video = torch.cat([truth, model, error], dim=2)
             report[f'openl_{key}'] = video_grid(video)
@@ -344,7 +353,7 @@ class WorldModel(nn.Module):
 # Actor-Critic and Critic functions (PyTorch version)
 # =============================================================================
 
-class ImagActorCritic(nn.Module):
+class ImagActorCritic(Module):
     def __init__(self, critics, scales, act_space, config):
         super().__init__()
         # Filter critics based on nonzero scales.
@@ -384,6 +393,7 @@ class ImagActorCritic(nn.Module):
 
     def update(self, traj):
         metrics = {}
+        # breakpoint()
         for key, critic in self.critics.items():
             mets = critic.train(traj, self.actor)
             for k, v in mets.items():
@@ -403,9 +413,7 @@ class ImagActorCritic(nn.Module):
         loss, mets = self.loss(traj, score_sum)
         metrics.update(mets)
         loss = loss.mean()
-        self.opt.zero_grad()
-        loss.backward()
-        self.opt.step()
+        self.opt.step(loss, [self.actor])
         return metrics
 
     def loss(self, traj, score):
@@ -438,7 +446,7 @@ class ImagActorCritic(nn.Module):
         loss = loss * traj['weight'][:-1].detach()
         return loss, metrics
 
-class VFunction(nn.Module):
+class VFunction(Module):
     def __init__(self, rewfn, config):
         super().__init__()
         assert 'action' not in config.critic.inputs, config.critic.inputs
@@ -452,21 +460,19 @@ class VFunction(nn.Module):
             self.target_net = self.net
         self.opt = Optimizer('critic', **self.config.critic_opt)
 
-    def train_v(self, traj, actor):
+    def train(self, traj, actor):
         metrics = {}
         reward = self.rewfn(traj)
         target, _ = self.target(traj, reward, self.config.critic_return)
-        self.opt.zero_grad()
         dist = self.net({k: v[:-1] for k, v in traj.items()})
         loss = -(dist.log_prob(target) * traj['weight'][:-1]).mean()
-        loss.backward()
-        self.opt.step()
+        self.opt.step(loss, [self.net])
         metrics.update({
             'critic_loss': loss.item(),
             'imag_reward_mean': reward.mean().item(),
             'imag_reward_std': reward.std().item(),
-            'imag_critic_mean': dist.mean().mean().item(),
-            'imag_critic_std': dist.mean().std().item(),
+            'imag_critic_mean': dist.mean.mean().item(),
+            'imag_critic_std': dist.mean.std().item(),
             'imag_return_mean': target.mean().item(),
             'imag_return_std': target.std().item(),
         })
@@ -480,7 +486,7 @@ class VFunction(nn.Module):
         if len(reward) != len(traj['action']) - 1:
             raise AssertionError('Should provide rewards for all but last action.')
         disc = traj['cont'][1:] * self.config.discount
-        value = self.target_net(traj).mean()
+        value = self.target_net(traj).mean
         if impl == 'gae':
             advs = [torch.zeros_like(value[0])]
             deltas = reward + disc * value[1:] - value[:-1]
@@ -508,7 +514,7 @@ class VFunction(nn.Module):
                 d.data.copy_(mix * s.data + (1 - mix) * d.data)
         self.updates += 1
 
-class QFunction(nn.Module):
+class QFunction(Module):
     def __init__(self, rewfn, config):
         super().__init__()
         assert config.actor_grad_disc == 'backprop'
@@ -527,7 +533,7 @@ class QFunction(nn.Module):
     def score(self, traj, actor):
         traj_detached = {k: v.detach() for k, v in traj.items()}
         inps = {**traj_detached, 'action': actor(traj_detached).sample()}
-        ret = self.net({**traj, 'action': actor(traj).sample()}).mode()[:-1]
+        ret = self.net({**traj, 'action': actor(traj).sample()}).mode[:-1]
         baseline = torch.zeros_like(ret)
         return ret, baseline
 
@@ -536,11 +542,9 @@ class QFunction(nn.Module):
         reward = self.rewfn(traj)
         target = self.target(traj, actor, reward).detach()
         inps = {k: v[:-1] for k, v in traj.items()}
-        self.opt.zero_grad()
         dist = self.net(inps)
         loss = -(dist.log_prob(target) * traj['weight'][:-1]).mean()
-        loss.backward()
-        self.opt.step()
+        self.opt.step(loss,[self.net])
         metrics.update({
             'imag_reward_mean': reward.mean().item(),
             'imag_reward_std': reward.std().item(),
@@ -579,7 +583,7 @@ class QFunction(nn.Module):
                 d.data.copy_(mix * s.data + (1 - mix) * d.data)
         self.updates += 1
 
-class TwinQFunction(nn.Module):
+class TwinQFunction(Module):
     def __init__(self, rewfn, config):
         super().__init__()
         assert config.actor_grad_disc == 'backprop'
@@ -596,14 +600,13 @@ class TwinQFunction(nn.Module):
         else:
             self.target_net1 = self.net1
             self.target_net2 = self.net2
-        params = list(self.net1.parameters()) + list(self.net2.parameters())
         self.opt = Optimizer('critic', **self.config.critic_opt)
 
     def score(self, traj, actor):
         traj_detached = {k: v.detach() for k, v in traj.items()}
         inps = {**traj_detached, 'action': actor(traj_detached).sample()}
-        ret1 = self.net1(inps).mode()
-        ret2 = self.net2(inps).mode()
+        ret1 = self.net1(inps).mode
+        ret2 = self.net2(inps).mode
         ret = torch.min(ret1, ret2)[:-1]
         baseline = torch.zeros_like(ret)
         return ret, baseline
@@ -619,8 +622,8 @@ class TwinQFunction(nn.Module):
         loss1 = -(dist1.log_prob(target) * traj['weight'][:-1]).mean()
         loss2 = -(dist2.log_prob(target) * traj['weight'][:-1]).mean()
         loss = loss1 + loss2
-        loss.backward()
-        self.opt.step()
+        modules = [self.net1, self.net2]
+        self.opt.step(loss, modules)
         metrics.update({
             'imag_reward_mean': reward.mean().item(),
             'imag_reward_std': reward.std().item(),

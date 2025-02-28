@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="director" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="dreamer" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="$USER_HOME$/.local/share/mamba/envs/director" project-jdk-type="Python SDK" />
 </project>
