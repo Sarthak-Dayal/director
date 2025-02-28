@@ -25,6 +25,19 @@ def map_structure(fn, x):
     else:
         return fn(x)
 
+def stack_nested(nested_list, dim=0):
+    if isinstance(nested_list[0], dict):
+        return {
+            key: stack_nested([d[key] for d in nested_list], dim=dim)
+            for key in nested_list[0]
+        }
+    elif isinstance(nested_list[0], (list, tuple)):
+        return type(nested_list[0])(
+            (stack_nested(sublist, dim=dim) for sublist in zip(*nested_list))
+        )
+    else:
+        return torch.stack(nested_list, dim=dim)
+
 def shuffle(x, axis):
     """Shuffle the tensor x along the specified axis."""
     perm = list(range(x.ndim))
@@ -65,7 +78,7 @@ def scan(fn, inputs, start, static=True, reverse=False, axis=0):
         inp = [x[i] for x in inputs] if isinstance(inputs, (list, tuple)) else inputs[i]
         last = fn(last, inp)
         collected.append(last)
-    out = torch.stack(collected, dim=axis)
+    out = stack_nested(collected, dim=axis)
     if axis == 1:
         def unswap(x):
             dims = list(range(x.ndim))
