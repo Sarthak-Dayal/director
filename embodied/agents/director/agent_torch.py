@@ -393,7 +393,6 @@ class ImagActorCritic(Module):
 
     def update(self, traj):
         metrics = {}
-        # breakpoint()
         for key, critic in self.critics.items():
             mets = critic.train(traj, self.actor)
             for k, v in mets.items():

@@ -27,7 +27,7 @@ class Logger:
     for name, value in dict(mapping).items():
       name = f'{prefix}/{name}' if prefix else name
       value = np.array(value)
-      if len(value.shape) not in (0, 2, 3, 4):
+      if len(value.shape) not in (0, 2, 3, 4, 5):
         raise ValueError(
             f"Shape {value.shape} for name '{name}' cannot be "
             "interpreted as scalar, image, or video.")
