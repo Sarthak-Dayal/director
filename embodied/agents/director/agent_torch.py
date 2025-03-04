@@ -333,8 +333,7 @@ class WorldModel(Module):
     def report(self, data):
         report = {}
         # We ignore the loss value here and just report the outputs.
-        _, _, loss_out, _ = self.loss(data)
-        report.update(loss_out)
+        report.update(self.loss(data)[-1])
         context, _ = self.rssm.observe(self.encoder(data)[:6, :5],
                                         data['action'][:6, :5],
                                         data['is_first'][:6, :5])
