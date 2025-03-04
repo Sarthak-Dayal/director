@@ -534,10 +534,10 @@ class AutoAdapt(Module):
             raise NotImplementedError(self._impl)
 
 class Normalize:
-    def __init__(self, impl='mean_std', decay=0.99, max_val=1e8, vareps=0.0, stdeps=0.0):
+    def __init__(self, impl='mean_std', decay=0.99, max=1e8, vareps=0.0, stdeps=0.0):
         self._impl = impl
         self._decay = decay
-        self._max = max_val
+        self._max = max
         self._stdeps = stdeps
         self._vareps = vareps
         self._mean = torch.tensor(0.0, dtype=torch.float64)
