@@ -7,6 +7,9 @@ import torch.distributions as td
 import re
 import inspect
 
+from torch.utils.data import IterableDataset
+
+
 # ---------------------------------------------------------------------------
 # Basic helper functions
 # ---------------------------------------------------------------------------
@@ -187,6 +190,12 @@ def balance_stats(dist, target, thres):
 # ---------------------------------------------------------------------------
 # Core Module and Optimizer Classes
 # ---------------------------------------------------------------------------
+class GeneratorDataset(IterableDataset):
+    def __init__(self, generator):
+        self.generator = generator
+    def __iter__(self):
+        return self.generator()
+
 class Module(nn.Module):
     def __init__(self):
         super().__init__()
