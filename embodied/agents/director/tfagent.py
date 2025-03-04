@@ -24,10 +24,8 @@ class TFAgent(tfutils.Module, embodied.Agent):
         self.strategy = self._setup()  # This sets self.device as well.
         # Create underlying agent instance.
         self.agent = super().__new__(subcls)
-        # with self._strategy_scope():
-        #     self.agent.__init__(obs_space, act_space, step, config)
-        torch.set_default_device(self.device)
-        self.agent.__init__(obs_space, act_space, step, config)
+        with self._strategy_scope():
+            self.agent.__init__(obs_space, act_space, step, config)
         # TensorFlow concrete function caching is not needed in PyTorch.
         self._cache_fns = False  # (config.tf.jit and not self.strategy)
         self._cached_fns = {}

@@ -304,12 +304,6 @@ class Optimizer(Module):
         }
         return metrics
 
-    @staticmethod
-    def video_grid(video):
-        B, T, H, W, C = video.shape
-        video = video.permute(1, 2, 0, 3, 4)
-        return video.reshape(T, H, B * W, C)
-
 # ---------------------------------------------------------------------------
 # Distribution Classes (wrappers)
 # ---------------------------------------------------------------------------

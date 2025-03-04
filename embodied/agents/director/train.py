@@ -19,11 +19,12 @@ sys.path.append(str(directory.parent.parent.parent))
 __package__ = directory.name
 
 import embodied
-
+import wandb
 
 def main(argv=None):
   from . import agent_torch as agnt
   from . import train_with_viz
+
 
   torch.autograd.set_detect_anomaly(True)
   parsed, other = embodied.Flags(
@@ -40,6 +41,9 @@ def main(argv=None):
   print(config)
 
   logdir = embodied.Path(config.logdir)
+  wandb.tensorboard.patch(root_logdir=str(logdir))
+  wandb.init(project="Director", sync_tensorboard=True)
+
   step = embodied.Counter()
   cleanup = []
 

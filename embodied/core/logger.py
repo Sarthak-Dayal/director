@@ -27,7 +27,7 @@ class Logger:
     for name, value in dict(mapping).items():
       name = f'{prefix}/{name}' if prefix else name
       value = np.array(value)
-      if len(value.shape) not in (0, 2, 3, 4, 5):
+      if len(value.shape) not in (0, 2, 3, 4):
         raise ValueError(
             f"Shape {value.shape} for name '{name}' cannot be "
             "interpreted as scalar, image, or video.")
@@ -165,30 +165,52 @@ class TensorBoardOutput(AsyncOutput):
       elif len(value.shape) == 2:
         self._writer.add_image(name, value, step)
       elif len(value.shape) == 3:
-        self._writer.add_image(name, value, step)
+        # If the image is in HWC (common in numpy), transpose to CHW.
+        # If it is already in CHW (e.g. a single-channel image with shape (1, H, W)
+        # or a color image with shape (3, H, W)), then leave it.
+        if value.shape[-1] in [1, 3, 4]:
+          # Assumed to be in HWC, so permute to CHW.
+          image = value.permute(2, 0, 1)
+        else:
+          image = value
+        self._writer.add_image(name, image, step)
       elif len(value.shape) == 4:
-        # self._video_summary(name, value, step)
-        self._writer.add_video(name, value[None], step, 16)
-      elif len(value.shape) == 5:
-        self._writer.add_video(name, value, step, 16)
+        self._video_summary(name, value, step)
+        # self._writer.add_video(name, value[None], step, 16)
     self._writer.flush()
 
   def _video_summary(self, name, video, step):
-    import tensorflow as tf
-    import tensorflow.compat.v1 as tf1
+    import torch
+    # Ensure name is a string.
     name = name if isinstance(name, str) else name.decode('utf-8')
+
+    # If the video is in floating point, scale to [0, 255] and convert to uint8.
     if np.issubdtype(video.dtype, np.floating):
       video = np.clip(255 * video, 0, 255).astype(np.uint8)
+
     try:
+      # Expect video shape to be (T, H, W, C)
       T, H, W, C = video.shape
-      summary = tf1.Summary()
-      image = tf1.Summary.Image(height=H, width=W, colorspace=C)
-      image.encoded_image_string = _encode_gif(video, self._fps)
-      summary.value.add(tag=name, image=image)
-      tf.summary.experimental.write_raw_pb(summary.SerializeToString(), step)
-    except (IOError, OSError) as e:
-      print('GIF summaries require ffmpeg in $PATH.', e)
-      tf.summary.image(name, video, step)
+
+      # Reorder axes from (T, H, W, C) to (T, C, H, W)
+      video = video.transpose(0, 3, 1, 2)
+
+      # Convert numpy array to a torch tensor.
+      video_tensor = torch.from_numpy(video)
+
+      # Add a batch dimension: now shape is (1, T, C, H, W)
+      video_tensor = video_tensor.unsqueeze(0)
+
+      # Log the video using PyTorch's SummaryWriter.
+      # self._fps should be defined in the class (as in the original TF code).
+      self._writer.add_video(tag=name, vid_tensor=video_tensor, global_step=step, fps=self._fps)
+
+    except Exception as e:
+      print("Error adding video summary with PyTorch SummaryWriter:", e)
+      # Fallback: log the first frame as an image.
+      # Rearrange the first frame from (H, W, C) to (C, H, W) for add_image.
+      first_frame = video[0].transpose(2, 0, 1)
+      self._writer.add_image(tag=name, img_tensor=first_frame, global_step=step)
 
 
 class MlflowOutput:

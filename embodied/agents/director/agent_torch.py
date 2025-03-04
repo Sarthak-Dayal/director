@@ -9,7 +9,7 @@ from torch.utils.data import IterableDataset, DataLoader
 import embodied
 
 from tfutils import Optimizer, balance_stats, Module, scan
-from .tfutils import recursive_detach
+from .tfutils import recursive_detach, video_grid
 
 
 # Dummy implementations for helper functions and modules.
@@ -21,11 +21,6 @@ def action_noise(action, noise, act_space):
     if noise > 0:
         return action + torch.randn_like(action) * noise
     return action
-
-
-def video_grid(video):
-    # Dummy implementation: in practice, format the tensor as a grid of videos.
-    return video
 
 class AutoAdapt(nn.Module):
     def __init__(self, shape, **kwargs):
@@ -333,7 +328,7 @@ class WorldModel(Module):
     def report(self, data):
         report = {}
         # We ignore the loss value here and just report the outputs.
-        _, _, loss_out, _ = self.loss(data)
+        loss_out = self.loss(data)[-1]
         report.update(loss_out)
         context, _ = self.rssm.observe(self.encoder(data)[:6, :5],
                                         data['action'][:6, :5],
