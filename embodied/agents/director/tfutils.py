@@ -550,10 +550,11 @@ class Normalize:
         return self.transform(values)
 
     def update(self, values):
-        x = values.to(torch.float64)
-        self._step += 1
-        self._mean = self._decay * self._mean + (1 - self._decay) * x.mean().double()
-        self._sqrs = self._decay * self._sqrs + (1 - self._decay) * (x ** 2).mean().double()
+        with torch.no_grad():
+            x = values.to(torch.float64)
+            self._step += 1
+            self._mean = self._decay * self._mean + (1 - self._decay) * x.mean().double()
+            self._sqrs = self._decay * self._sqrs + (1 - self._decay) * (x ** 2).mean().double()
 
     def transform(self, values):
         correction = 1 - self._decay ** self._step
@@ -598,6 +599,13 @@ class Input(Module):
                 value = value.view(*new_shape)
             new_vals.append(value.to(inputs[self._dims].dtype))
         return torch.cat(new_vals, dim=-1)
+
+# Dataset wrapper for generator.
+class GeneratorDataset(IterableDataset):
+    def __init__(self, generator):
+        self.generator = generator
+    def __iter__(self):
+        return self.generator()
 
 def get_act(name):
     if callable(name):

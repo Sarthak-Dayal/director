@@ -8,8 +8,8 @@ from torch.utils.data import IterableDataset, DataLoader
 
 import embodied
 
-from tfutils import Optimizer, balance_stats, Module, scan, AutoAdapt, symlog, Normalize, action_noise, GeneratorDataset
-from .tfutils import recursive_detach, video_grid
+from tfutils import Optimizer, balance_stats, Module, scan, video_grid, action_noise, symlog, AutoAdapt, Normalize, \
+    GeneratorDataset, recursive_detach
 
 # =============================================================================
 # Agent and World Model (PyTorch version)
@@ -106,9 +106,9 @@ class Agent(tfagent.TFAgent):
 
     def dataset(self, generator):
         if self.config.data_loader == 'tfdata':
-            return DataLoader(GeneratorDataset(generator), batch_size=self.config.batch_size)
+            return DataLoader(dataset=GeneratorDataset(generator), batch_size=self.config.batch_size)
         elif self.config.data_loader == 'embodied':
-            return embodied.Prefetch(sources=[generator] * self.config.batch_size, workers=8, prefetch=4)
+            return embodied.Prefetch([generator] * self.config.batch_size, workers=8, prefetch=4)
         else:
             raise NotImplementedError(self.config.data_loader)
 
@@ -280,8 +280,7 @@ class WorldModel(Module):
     def report(self, data):
         report = {}
         # We ignore the loss value here and just report the outputs.
-        loss_out = self.loss(data)[-1]
-        report.update(loss_out)
+        report.update(self.loss(data)[-1])
         context, _ = self.rssm.observe(self.encoder(data)[:6, :5],
                                         data['action'][:6, :5],
                                         data['is_first'][:6, :5])
@@ -453,10 +452,9 @@ class VFunction(Module):
     def update_slow(self):
         if not self.config.slow_target:
             return
-        initialize = self.updates == -1
-        if initialize or self.updates >= self.config.slow_target_update:
+        if self.updates == -1 or self.updates >= self.config.slow_target_update:
             self.updates = 0
-            mix = 1.0 if initialize else self.config.slow_target_fraction
+            mix = 1.0 if self.updates == 0 else self.config.slow_target_fraction
             for s, d in zip(self.net.parameters(), self.target_net.parameters()):
                 d.data.copy_(mix * s.data + (1 - mix) * d.data)
         self.updates += 1
@@ -523,10 +521,9 @@ class QFunction(Module):
     def update_slow(self):
         if not self.config.slow_target:
             return
-        initialize = self.updates == -1
-        if initialize or self.updates >= self.config.slow_target_update:
+        if self.updates == -1 or self.updates >= self.config.slow_target_update:
             self.updates = 0
-            mix = 1.0 if initialize else self.config.slow_target_fraction
+            mix = 1.0 if self.updates == 0 else self.config.slow_target_fraction
             for s, d in zip(self.net.parameters(), self.target_net.parameters()):
                 d.data.copy_(mix * s.data + (1 - mix) * d.data)
         self.updates += 1
@@ -605,10 +602,9 @@ class TwinQFunction(Module):
     def update_slow(self):
         if not self.config.slow_target:
             return
-        initialize = self.updates == -1
-        if initialize or self.updates >= self.config.slow_target_update:
+        if self.updates == -1 or self.updates >= self.config.slow_target_update:
             self.updates = 0
-            mix = 1.0 if initialize else self.config.slow_target_fraction
+            mix = 1.0 if self.updates == 0 else self.config.slow_target_fraction
             for s, d in zip(self.net1.parameters(), self.target_net1.parameters()):
                 d.data.copy_(mix * s.data + (1 - mix) * d.data)
             for s, d in zip(self.net2.parameters(), self.target_net2.parameters()):
