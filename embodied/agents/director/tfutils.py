@@ -7,6 +7,9 @@ import torch.distributions as td
 import re
 import inspect
 
+from torch.utils.data import IterableDataset
+
+
 # ---------------------------------------------------------------------------
 # Basic helper functions
 # ---------------------------------------------------------------------------
@@ -531,10 +534,10 @@ class AutoAdapt(Module):
             raise NotImplementedError(self._impl)
 
 class Normalize:
-    def __init__(self, impl='mean_std', decay=0.99, max_val=1e8, vareps=0.0, stdeps=0.0):
+    def __init__(self, impl='mean_std', decay=0.99, max=1e8, vareps=0.0, stdeps=0.0):
         self._impl = impl
         self._decay = decay
-        self._max = max_val
+        self._max = max
         self._stdeps = stdeps
         self._vareps = vareps
         self._mean = torch.tensor(0.0, dtype=torch.float64)
@@ -547,10 +550,11 @@ class Normalize:
         return self.transform(values)
 
     def update(self, values):
-        x = values.to(torch.float64)
-        self._step += 1
-        self._mean = self._decay * self._mean + (1 - self._decay) * x.mean().double()
-        self._sqrs = self._decay * self._sqrs + (1 - self._decay) * (x ** 2).mean().double()
+        with torch.no_grad():
+            x = values.to(torch.float64)
+            self._step += 1
+            self._mean = self._decay * self._mean + (1 - self._decay) * x.mean().double()
+            self._sqrs = self._decay * self._sqrs + (1 - self._decay) * (x ** 2).mean().double()
 
     def transform(self, values):
         correction = 1 - self._decay ** self._step
@@ -595,6 +599,13 @@ class Input(Module):
                 value = value.view(*new_shape)
             new_vals.append(value.to(inputs[self._dims].dtype))
         return torch.cat(new_vals, dim=-1)
+
+# Dataset wrapper for generator.
+class GeneratorDataset(IterableDataset):
+    def __init__(self, generator):
+        self.generator = generator
+    def __iter__(self):
+        return self.generator()
 
 def get_act(name):
     if callable(name):

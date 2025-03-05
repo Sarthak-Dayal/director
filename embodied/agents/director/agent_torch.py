@@ -8,61 +8,8 @@ from torch.utils.data import IterableDataset, DataLoader
 
 import embodied
 
-from tfutils import Optimizer, balance_stats, Module, scan
-from .tfutils import recursive_detach
-
-
-# Dummy implementations for helper functions and modules.
-# (Replace these with your own PyTorch implementations as needed.)
-def symlog(x):
-    return torch.sign(x) * torch.log1p(torch.abs(x))
-
-def action_noise(action, noise, act_space):
-    if noise > 0:
-        return action + torch.randn_like(action) * noise
-    return action
-
-
-def video_grid(video):
-    # Dummy implementation: in practice, format the tensor as a grid of videos.
-    return video
-
-class AutoAdapt(nn.Module):
-    def __init__(self, shape, **kwargs):
-        super().__init__()
-        # Dummy parameter for adaptation.
-        self.param = nn.Parameter(torch.tensor(1.0))
-    def forward(self, x, update=False):
-        # Simply return the input and an empty dict of metrics.
-        return x, {}
-
-class Normalize(nn.Module):
-    def __init__(self, **kwargs):
-        super().__init__()
-    def forward(self, x, update=True):
-        return x
-
-# Dummy dataset wrappers for generators.
-class GeneratorDataset(IterableDataset):
-    def __init__(self, generator):
-        self.generator = generator
-    def __iter__(self):
-        return self.generator()
-
-class TorchDataLoaderIterable(DataLoader):
-    def __init__(self, generator, batch_size):
-        dataset = GeneratorDataset(generator)
-        super().__init__(dataset, batch_size=batch_size)
-
-class EmbodiedPrefetch:
-    def __init__(self, generator, batch_size, workers, prefetch):
-        # Here we simply wrap the generator in a DataLoader.
-        self.loader = DataLoader(GeneratorDataset(generator),
-                                 batch_size=batch_size,
-                                 num_workers=workers,
-                                 prefetch_factor=prefetch)
-    def __iter__(self):
-        return iter(self.loader)
+from tfutils import Optimizer, balance_stats, Module, scan, video_grid, action_noise, symlog, AutoAdapt, Normalize, \
+    GeneratorDataset, recursive_detach
 
 # =============================================================================
 # Agent and World Model (PyTorch version)
@@ -159,9 +106,9 @@ class Agent(tfagent.TFAgent):
 
     def dataset(self, generator):
         if self.config.data_loader == 'tfdata':
-            return TorchDataLoaderIterable(generator, self.config.batch_size)
+            return DataLoader(dataset=GeneratorDataset(generator), batch_size=self.config.batch_size)
         elif self.config.data_loader == 'embodied':
-            return EmbodiedPrefetch(generator, self.config.batch_size, workers=8, prefetch=4)
+            return embodied.Prefetch([generator] * self.config.batch_size, workers=8, prefetch=4)
         else:
             raise NotImplementedError(self.config.data_loader)
 
