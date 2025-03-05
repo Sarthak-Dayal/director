@@ -41,8 +41,8 @@ def main(argv=None):
   print(config)
 
   logdir = embodied.Path(config.logdir)
-  # wandb.tensorboard.patch(root_logdir=str(logdir))
-  # wandb.init(project="Director", sync_tensorboard=True)
+  wandb.tensorboard.patch(root_logdir=str(logdir))
+  wandb.init(project="Director", sync_tensorboard=True)
 
   step = embodied.Counter()
   cleanup = []
