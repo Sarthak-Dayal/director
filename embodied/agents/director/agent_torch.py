@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from torch.nn import ModuleDict
 from torch.utils.data import IterableDataset, DataLoader
 
 import embodied
@@ -148,7 +149,7 @@ class WorldModel(Module):
         self.config = config
         self.rssm = nets_torch.RSSM(**config.rssm)
         self.encoder = nets_torch.MultiEncoder(shapes, **config.encoder)
-        self.heads = {}
+        self.heads = ModuleDict()
         self.heads['decoder'] = nets_torch.MultiDecoder(shapes, **config.decoder)
         self.heads['reward'] = nets_torch.MLP((), **config.reward_head)
         self.heads['cont'] = nets_torch.MLP((), **config.cont_head)

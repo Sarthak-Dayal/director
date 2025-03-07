@@ -271,12 +271,15 @@ class Optimizer(Module):
         if not isinstance(modules, (list, tuple)):
             modules = [modules]
         varibs = []
+        named_params = set()
         for module in modules:
             varibs.extend(list(module.parameters()))
+            named_params.update(name for name, _ in module.named_parameters())
         count = sum(np.prod(p.shape) for p in varibs)
         if self._updates == 0:
             print(f"Found {count} {self._name} parameters.")
         if self._optimizer is None:
+            self.first_named_params = named_params
             if self._opt_type == 'adam':
                 self._optimizer = torch.optim.Adam(varibs, lr=self._lr, eps=self._eps)
             elif self._opt_type == 'sgd':
@@ -285,6 +288,8 @@ class Optimizer(Module):
                 self._optimizer = torch.optim.SGD(varibs, lr=self._lr, momentum=0.9)
             else:
                 raise NotImplementedError(self._opt_type)
+
+        assert self.first_named_params == named_params
         self._optimizer.zero_grad()
         loss.backward()
         if self._clip:
@@ -317,17 +322,19 @@ class Optimizer(Module):
 # Distribution Classes (wrappers)
 # ---------------------------------------------------------------------------
 
-# Mean-squared error distribution
+# Mean-squared error distribution.
 class MSEDist(td.Distribution):
     arg_constraints = {}
     support = td.constraints.real
-    has_rsample = False
+    has_rsample = True
 
-    def __init__(self, pred, dims, agg='sum'):
-        self.pred = pred
+    def __init__(self, pred, dims, agg='sum', validate_args=None):
+        self.pred = pred  # Tensor expected.
         self._dims = dims
         self._axes = tuple(-i for i in range(1, dims + 1))
         self._agg = agg
+        self._validate_args = validate_args
+        super().__init__(validate_args=validate_args)
 
     @property
     def batch_shape(self):
@@ -345,11 +352,15 @@ class MSEDist(td.Distribution):
     def mode(self):
         return self.pred
 
-    def sample(self, sample_shape=torch.Size(), seed=None):
+    def rsample(self, sample_shape=torch.Size()):
         return self.pred.expand(sample_shape + self.pred.shape)
 
+    def sample(self, sample_shape=torch.Size()):
+        return self.rsample(sample_shape)
+
     def log_prob(self, value):
-        assert self.pred.shape == value.shape, f"{self.pred.shape} vs {value.shape}"
+        if self.pred.shape != value.shape:
+            raise ValueError(f"Shape mismatch: {self.pred.shape} vs {value.shape}")
         distance = (self.pred - value) ** 2
         if self._agg == 'mean':
             loss = distance.mean(dim=self._axes)
@@ -359,14 +370,22 @@ class MSEDist(td.Distribution):
             raise NotImplementedError(self._agg)
         return -loss
 
-# Cosine similarity based distribution
+    def expand(self, batch_shape, _instance=None):
+        new_pred = self.pred.expand(batch_shape + self.event_shape)
+        return type(self)(new_pred, self._dims, self._agg, validate_args=self._validate_args)
+
+
+# Cosine similarity based distribution.
 class CosineDist(td.Distribution):
     arg_constraints = {}
     support = td.constraints.real
-    has_rsample = False
+    has_rsample = True
 
-    def __init__(self, pred):
+    def __init__(self, pred, validate_args=None):
+        # Normalize along the last dimension.
         self.pred = F.normalize(pred, p=2, dim=-1)
+        self._validate_args = validate_args
+        super().__init__(validate_args=validate_args)
 
     @property
     def batch_shape(self):
@@ -384,21 +403,38 @@ class CosineDist(td.Distribution):
     def mode(self):
         return self.pred
 
-    def sample(self, sample_shape=torch.Size(), seed=None):
+    def rsample(self, sample_shape=torch.Size()):
         return self.pred.expand(sample_shape + self.pred.shape)
 
+    def sample(self, sample_shape=torch.Size()):
+        return self.rsample(sample_shape)
+
     def log_prob(self, value):
-        assert self.pred.shape == value.shape, f"{self.pred.shape} vs {value.shape}"
+        if self.pred.shape != value.shape:
+            raise ValueError(f"Shape mismatch: {self.pred.shape} vs {value.shape}")
         return (self.pred * value).sum(dim=-1)
 
-# Directional distribution built on a Normal then wrapped as an Independent distribution.
+    def expand(self, batch_shape, _instance=None):
+        new_pred = self.pred.expand(batch_shape + self.event_shape)
+        return type(self)(new_pred, validate_args=self._validate_args)
+
+
+# Directional distribution built on a Normal and reparameterized via rsample.
 class DirDist(td.Independent):
-    def __init__(self, mean, std):
-        norm_mean = F.normalize(mean.float(), p=2, dim=-1)
+    has_rsample = True
+
+    def __init__(self, mean, std, validate_args=None):
+        # Normalize and broadcast parameters.
+        mean = mean.float()
+        std = std.float()
+        norm_mean = F.normalize(mean, p=2, dim=-1)
+        norm_mean, std = torch.broadcast_tensors(norm_mean, std)
         self._mean = norm_mean
-        self.std_tensor = std.float()
-        base = td.Normal(norm_mean, self.std_tensor)
-        super().__init__(base, 1)
+        self.std_tensor = std
+        self._validate_args = validate_args
+        base = td.Normal(norm_mean, std, validate_args=validate_args)
+        # Wrap base distribution with one event dimension.
+        super().__init__(base, 1, validate_args=validate_args)
 
     @property
     def mean(self):
@@ -406,25 +442,46 @@ class DirDist(td.Independent):
 
     @property
     def mode(self):
-        # For a Normal distribution, the mode equals the mean.
         return self._mean
 
-    def sample(self, sample_shape=torch.Size(), seed=None):
-        sample = super().sample(sample_shape)
+    def rsample(self, sample_shape=torch.Size()):
+        sample = super().rsample(sample_shape)
         return F.normalize(sample, p=2, dim=-1)
+
+    def sample(self, sample_shape=torch.Size()):
+        return self.rsample(sample_shape)
 
     def log_prob(self, value):
         norm_value = F.normalize(value.float(), p=2, dim=-1)
         return super().log_prob(norm_value)
 
-# Symlog distribution; assumes symexp and symlog are defined elsewhere.
-class SymlogDist:
-    def __init__(self, mode, dims, agg='sum'):
+    def expand(self, batch_shape, _instance=None):
+        new_mean = self._mean.expand(batch_shape + self._mean.shape[-1:])
+        new_std = self.std_tensor.expand(batch_shape + self.std_tensor.shape[-1:])
+        return type(self)(new_mean, new_std, validate_args=self._validate_args)
+
+
+# Symlog distribution.
+class SymlogDist(td.Distribution):
+    arg_constraints = {}
+    support = td.constraints.real
+    has_rsample = True
+
+    def __init__(self, mode, dims, agg='sum', validate_args=None):
         self._mode = mode
-        self._dims = dims  # number of event dimensions
+        self._dims = dims  # number of event dimensions.
         self._agg = agg
-        self.batch_shape = mode.shape[:-dims]
-        self.event_shape = mode.shape[-dims:]
+        self._axes = tuple(-i for i in range(1, dims + 1))
+        self._validate_args = validate_args
+        super().__init__(validate_args=validate_args)
+
+    @property
+    def batch_shape(self):
+        return self._mode.shape[:-self._dims] if self._dims > 0 else self._mode.shape
+
+    @property
+    def event_shape(self):
+        return self._mode.shape[-self._dims:] if self._dims > 0 else torch.Size()
 
     @property
     def mean(self):
@@ -434,44 +491,205 @@ class SymlogDist:
     def mode(self):
         return symexp(self._mode)
 
+    def rsample(self, sample_shape=torch.Size()):
+        return symexp(self._mode).expand(sample_shape + self._mode.shape)
+
+    def sample(self, sample_shape=torch.Size()):
+        return self.rsample(sample_shape)
+
     def log_prob(self, value):
-        assert self._mode.shape == value.shape, f"{self._mode.shape} vs {value.shape}"
+        if self._mode.shape != value.shape:
+            raise ValueError(f"Shape mismatch: {self._mode.shape} vs {value.shape}")
         distance = (self._mode - symlog(value)) ** 2
-        axes = tuple(-i for i in range(1, self._dims + 1))
         if self._agg == 'mean':
-            loss = distance.mean(dim=axes)
+            loss = distance.mean(dim=self._axes)
         elif self._agg == 'sum':
-            loss = distance.sum(dim=axes)
+            loss = distance.sum(dim=self._axes)
         else:
             raise NotImplementedError(self._agg)
         return -loss
 
-# One-hot categorical distribution with a custom mode and sample behavior.
+    def expand(self, batch_shape, _instance=None):
+        new_mode = self._mode.expand(batch_shape + self.event_shape)
+        return type(self)(new_mode, self._dims, self._agg, validate_args=self._validate_args)
+
+
+# One-hot categorical distribution using Gumbel-Softmax.
 class OneHotDist(td.OneHotCategorical):
-    def __init__(self, logits=None, probs=None, dtype=torch.float32):
-        super().__init__(logits=logits, probs=probs)
+    has_rsample = True
+
+    def __init__(self, logits=None, probs=None, dtype=torch.float32, validate_args=None):
+        # When both are provided, broadcasting is done by the parent.
         self._dtype = dtype
+        self._validate_args = validate_args
+        super().__init__(logits=logits, probs=probs, validate_args=validate_args)
+
+    @property
+    def batch_shape(self):
+        if self.logits is not None:
+            return self.logits.shape[:-1]
+        else:
+            return self.probs.shape[:-1]
+
+    @property
+    def event_shape(self):
+        if self.logits is not None:
+            return self.logits.shape[-1:]
+        else:
+            return self.probs.shape[-1:]
 
     @property
     def mean(self):
-        # Returning the probability vector as the mean.
         return self.probs
 
     @property
     def mode(self):
-        _mode = F.one_hot(torch.argmax(self.logits, dim=-1), num_classes=self.logits.shape[-1])
-        # The "straight-through" trick: add the difference between logits and their detached version.
-        return _mode.float() + self.logits - self.logits.detach()
+        return self.probs
 
-    def sample(self, sample_shape=torch.Size(), seed=None):
-        if seed is not None:
-            raise ValueError("Seed not supported")
-        sample = super().sample(sample_shape).detach()
-        probs = self.probs
-        while probs.ndim < sample.ndim:
-            probs = probs.unsqueeze(0)
-        sample = sample + (probs - probs.detach())
+    def rsample(self, sample_shape=torch.Size()):
+        logits = self.logits
+        if sample_shape:
+            logits = logits.expand(sample_shape + logits.shape)
+        sample = F.gumbel_softmax(logits, tau=1.0, hard=False, dim=-1)
+        return sample.to(self._dtype)
+
+    def sample(self, sample_shape=torch.Size()):
+        return self.rsample(sample_shape)
+
+    def expand(self, batch_shape, _instance=None):
+        if self.logits is not None:
+            new_logits = self.logits.expand(batch_shape + self.event_shape)
+            return type(self)(logits=new_logits, dtype=self._dtype, validate_args=self._validate_args)
+        else:
+            new_probs = self.probs.expand(batch_shape + self.event_shape)
+            return type(self)(probs=new_probs, dtype=self._dtype, validate_args=self._validate_args)
+
+class NormalDist(td.Normal):
+    arg_constraints = {'loc': td.constraints.real, 'scale': td.constraints.positive}
+    support = td.constraints.real
+    has_rsample = True
+
+    def __init__(self, loc, scale, validate_args=None):
+        # Broadcast loc and scale so that they have a common shape.
+        loc, scale = torch.broadcast_tensors(loc, scale)
+        self._validate_args = validate_args
+        super().__init__(loc, scale, validate_args=validate_args)
+
+    @property
+    def mean(self):
+        return self.loc
+
+    @property
+    def mode(self):
+        return self.loc
+
+    @property
+    def variance(self):
+        return self.scale ** 2
+
+    @property
+    def stddev(self):
+        return self.scale
+
+    def sample(self, sample_shape=torch.Size()):
+        # Ensure that even sample() returns a reparameterized sample.
+        return self.rsample(sample_shape)
+
+    def expand(self, batch_shape, _instance=None):
+        new_loc = self.loc.expand(batch_shape)
+        new_scale = self.scale.expand(batch_shape)
+        return type(self)(new_loc, new_scale, validate_args=self._validate_args)
+
+# Truncated Normal distribution wrapper.
+class TruncatedNormalDist(td.Distribution):
+    arg_constraints = {'loc': td.constraints.real, 'scale': td.constraints.positive}
+    support = td.constraints.interval(-1, 1)
+    has_rsample = True
+
+    def __init__(self, loc, scale, validate_args=None):
+        self.loc, self.scale = torch.broadcast_tensors(loc, scale)
+        self._base = td.Normal(self.loc, self.scale, validate_args=validate_args)
+        self._validate_args = validate_args
+        super().__init__(validate_args=validate_args)
+
+    @property
+    def batch_shape(self):
+        return self.loc.shape
+
+    @property
+    def event_shape(self):
+        return torch.Size([])
+
+    @property
+    def mean(self):
+        return self.loc.clamp(-1, 1)
+
+    @property
+    def mode(self):
+        return self.loc.clamp(-1, 1)
+
+    def rsample(self, sample_shape=torch.Size()):
+        sample = self._base.rsample(sample_shape)
+        return sample.clamp(-1, 1)
+
+    def sample(self, sample_shape=torch.Size()):
+        return self.rsample(sample_shape)
+
+    def log_prob(self, value):
+        return self._base.log_prob(value)
+
+    def expand(self, batch_shape, _instance=None):
+        new_loc = self.loc.expand(batch_shape)
+        new_scale = self.scale.expand(batch_shape)
+        return type(self)(new_loc, new_scale, validate_args=self._validate_args)
+
+
+# Differentiable Bernoulli distribution.
+class BernoulliDist(td.Bernoulli):
+    has_rsample = True
+
+    def __init__(self, logits=None, probs=None, validate_args=None):
+        self._validate_args = validate_args
+        super().__init__(logits=logits, probs=probs, validate_args=validate_args)
+
+    @property
+    def batch_shape(self):
+        if self.logits is not None:
+            return self.logits.shape
+        else:
+            return self.probs.shape
+
+    @property
+    def event_shape(self):
+        return torch.Size([])
+
+    @property
+    def mean(self):
+        return self.probs
+
+    @property
+    def mode(self):
+        return (self.probs >= 0.5).float()
+
+    def rsample(self, sample_shape=torch.Size()):
+        if self.probs is None:
+            raise ValueError("Bernoulli distribution requires logits or probabilities.")
+        gumbel_noise = -torch.log(
+            -torch.log(torch.rand(sample_shape + self.probs.shape, device=self.probs.device) + 1e-10) + 1e-10
+        )
+        sample = torch.sigmoid((self.logits + gumbel_noise))
         return sample
+
+    def sample(self, sample_shape=torch.Size()):
+        return self.rsample(sample_shape)
+
+    def expand(self, batch_shape, _instance=None):
+        if self.logits is not None:
+            new_logits = self.logits.expand(batch_shape)
+            return type(self)(logits=new_logits, validate_args=self._validate_args)
+        else:
+            new_probs = self.probs.expand(batch_shape)
+            return type(self)(probs=new_probs, validate_args=self._validate_args)
 
 # ---------------------------------------------------------------------------
 # AutoAdapt and Normalize

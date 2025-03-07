@@ -7,6 +7,8 @@ from . import expl
 from . import tfutils
 
 from .hierarchy import Hierarchy  # if needed
+from .tfutils import OneHotDist
+
 
 class Greedy(tfutils.Module):
     def __init__(self, wm, act_space, config):
@@ -45,7 +47,7 @@ class Random(tfutils.Module):
         batch_size = len(state)
         shape = (batch_size,) + self.act_space.shape
         if self.act_space.discrete:
-            dist_obj = tfutils.OneHotDist(torch.zeros(shape))
+            dist_obj = OneHotDist(torch.zeros(shape))
         else:
             dist_obj = td.Uniform(-torch.ones(shape), torch.ones(shape))
             dist_obj = td.Independent(dist_obj, 1)

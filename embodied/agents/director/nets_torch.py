@@ -7,8 +7,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as td
 
+from embodied.agents.director.tfutils import BernoulliDist
 # Import our common helper functions and classes from tfutils
-from tfutils import Module, SymlogDist, MSEDist, scan, map_structure, get_act, Input, tensor, symlog, symexp
+from tfutils import Module, SymlogDist, MSEDist, scan, map_structure, get_act, Input, tensor, symlog, symexp, \
+    OneHotDist, NormalDist
+
 
 # ---------------------------
 # RSSM
@@ -82,10 +85,10 @@ class RSSM(Module):
     def get_dist(self, state, argmax=False):
         if self._classes:
             logit = state['logit'].to(torch.float32)
-            dist_obj = td.Independent(self.get('OneHotDist', td.OneHotCategorical, logits=logit), 1)
+            dist_obj = td.Independent(OneHotDist(logits=logit), 1)
         else:
             mean, std = state['mean'].to(torch.float32), state['std'].to(torch.float32)
-            dist_obj = td.Independent(td.Normal(mean, std), 1)
+            dist_obj = td.Independent(NormalDist(loc=mean, scale=std), 1)
         return dist_obj
 
     def obs_step(self, prev_state, prev_action, embed, is_first):
@@ -364,13 +367,13 @@ class DistLayer(Module):
             return MSEDist(out, len(self._shape), 'sum')
         if self._dist == 'cos':
             assert len(self._shape) == 1
-            return td.Independent(td.Normal(out, 1), 1)
+            return td.Independent(NormalDist(out, 1), 1)
         if self._dist == 'dir':
             lo, hi = self._minstd, self._maxstd
             std = self.get('std', Dense, int(np.prod(self._shape)))(inputs)
             std = std.view(*inputs.shape[:-1], *self._shape).to(torch.float32)
             std = (hi - lo) * torch.sigmoid(std) + lo
-            dist_obj = td.Independent(td.Normal(out, std), 1)
+            dist_obj = td.Independent(NormalDist(out, std), 1)
             dist_obj.minent = np.prod(self._shape) * td.Normal(0.0, lo).entropy()
             dist_obj.maxent = np.prod(self._shape) * td.Normal(0.0, hi).entropy()
             return dist_obj
@@ -379,32 +382,37 @@ class DistLayer(Module):
             std = self.get('std', Dense, int(np.prod(self._shape)))(inputs)
             std = std.view(*inputs.shape[:-1], *self._shape).to(torch.float32)
             std = (hi - lo) * torch.sigmoid(std) + lo
-            dist_obj = td.Normal(torch.tanh(out), std)
+            # dist_obj = td.Normal(torch.tanh(out), std)
+            dist_obj = NormalDist(torch.tanh(out), std)
             dist_obj = td.Independent(dist_obj, len(self._shape))
             dist_obj.minent = np.prod(self._shape) * td.Normal(0.0, lo).entropy()
             dist_obj.maxent = np.prod(self._shape) * td.Normal(0.0, hi).entropy()
             return dist_obj
         if self._dist == 'binary':
-            dist_obj = td.Bernoulli(logits=out)
+            dist_obj = BernoulliDist(logits=out)
             return td.Independent(dist_obj, len(self._shape))
         if self._dist == 'trunc_normal':
-            lo, hi = self._minstd, self._maxstd
-            std = self.get('std', Dense, int(np.prod(self._shape)))(inputs)
-            std = std.view(*inputs.shape[:-1], *self._shape).to(torch.float32)
-            std = (hi - lo) * torch.sigmoid(std) + lo
-            dist_obj = td.Normal(torch.tanh(out), std)
-            dist_obj = td.Independent(dist_obj, 1)
-            dist_obj.minent = np.prod(self._shape) * td.Normal(0.99, lo).entropy()
-            dist_obj.maxent = np.prod(self._shape) * td.Normal(0.0, hi).entropy()
-            return dist_obj
+            # lo, hi = self._minstd, self._maxstd
+            # std = self.get('std', Dense, int(np.prod(self._shape)))(inputs)
+            # std = std.view(*inputs.shape[:-1], *self._shape).to(torch.float32)
+            # std = (hi - lo) * torch.sigmoid(std) + lo
+            # # dist_obj = td.Normal(torch.tanh(out), std)
+            # dist_obj = NormalDist(torch.tanh(out), std)
+            # dist_obj = td.Independent(dist_obj, 1)
+            # dist_obj.minent = np.prod(self._shape) * td.Normal(0.99, lo).entropy()
+            # dist_obj.maxent = np.prod(self._shape) * td.Normal(0.0, hi).entropy()
+            # return dist_obj
+            raise NotImplementedError(self._dist)
         if self._dist == 'onehot':
             if self._unimix:
                 probs = F.softmax(out, dim=-1)
                 uniform = torch.ones_like(probs) / probs.shape[-1]
                 probs = (1 - self._unimix) * probs + self._unimix * uniform
-                dist_obj = self.get('OneHotDist', td.OneHotCategorical, probs=probs)
+                # dist_obj = self.get('OneHotDist', td.OneHotCategorical, probs=probs)
+                dist_obj = OneHotDist(probs=probs)
             else:
-                dist_obj = self.get('OneHotDist', td.OneHotCategorical, logits=out)
+                # dist_obj = self.get('OneHotDist', td.OneHotCategorical, logits=out)
+                dist_obj = OneHotDist(logits=out)
             if len(self._shape) > 1:
                 dist_obj = td.Independent(dist_obj, len(self._shape)-1)
             dist_obj.minent = 0.0
