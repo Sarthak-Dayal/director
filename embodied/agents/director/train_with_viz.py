@@ -1,10 +1,16 @@
 import collections
 import re
 import warnings
+import torch
 
 import embodied
 import numpy as np
 
+def get_gpu_memory_usage():
+  free_memory, total_memory = torch.cuda.mem_get_info()
+  used_memory = total_memory - free_memory
+  percent_usage = (used_memory / total_memory) * 100
+  return percent_usage
 
 def train_with_viz(agent, env, train_replay, eval_replay, logger, args):
 
@@ -25,6 +31,7 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args):
 
   nonzeros = set()
   def per_episode(ep):
+    print(f"GPU usage: {get_gpu_memory_usage()}%")
     metrics = {}
     length = len(ep['reward']) - 1
     score = float(ep['reward'].astype(np.float64).sum())
@@ -89,6 +96,7 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args):
   def train_step(tran, worker):
     if should_train(step):
       for _ in range(args.train_steps):
+        print(f"GPU usage: {get_gpu_memory_usage()}%")
         batch[0] = next(dataset_train)
         outs, state[0], mets = agent.train(batch[0], state[0])
         [metrics[key].append(value) for key, value in mets.items()]
@@ -125,6 +133,7 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args):
     # for name, values in scalars.items():
     #   logger.scalar(f'eval/{name}', np.array(values, np.float64).mean())
     logger.write()
-    driver(policy, steps=args.eval_every)
+    with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+      driver(policy, steps=args.eval_every)
     checkpoint.save()
 

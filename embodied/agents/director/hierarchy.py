@@ -115,7 +115,7 @@ class Hierarchy(tfutils.Module):
         return outs, new_carry
 
     def train(self, imagine, start, data):
-        success = lambda rew: (rew[-1] > 0.7).float().mean()
+        success = lambda rew: (rew[-1] > 0.7).float().mean().detach().cpu().item()
         metrics = {}
         if self.config.expl_rew == 'disag':
             metrics.update(self.expl_reward.train(data))

@@ -1,4 +1,7 @@
 # tfutils.py
+from datetime import datetime
+import socket
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -178,13 +181,13 @@ def balance_stats(dist, target, thres):
     avg = target.mean()
     pred_mean = dist.mean.to(torch.float32).mean()
     return dict(
-        pos_loss=pos_loss,
-        neg_loss=neg_loss,
-        pos_acc=pos_acc,
-        neg_acc=neg_acc,
-        rate=rate,
-        avg=avg,
-        pred=pred_mean,
+        pos_loss=pos_loss.detach().cpu().item(),
+        neg_loss=neg_loss.detach().cpu().item(),
+        pos_acc=pos_acc.detach().cpu().item(),
+        neg_acc=neg_acc.detach().cpu().item(),
+        rate=rate.detach().cpu().item(),
+        avg=avg.detach().cpu().item(),
+        pred=pred_mean.detach().cpu().item(),
     )
 
 # ---------------------------------------------------------------------------
@@ -245,78 +248,98 @@ class Module(nn.Module):
 
 
 class Optimizer(Module):
-    def __init__(self, name, lr, opt='adam', eps=1e-5, clip=0.0, warmup=0, wd=0.0, wd_pattern='kernel'):
-        super().__init__()
-        assert 0 <= wd < 1, "weight decay must be in [0,1)"
-        if clip:
-            assert clip >= 1, "clip must be at least 1"
-        self._name = name
-        self._clip = clip
-        self._warmup = warmup
-        self._wd = wd
-        self._wd_pattern = wd_pattern
-        self._updates = 0
-        self._base_lr = lr
-        self._lr = lr
-        self._opt_type = opt
-        self._eps = eps
-        self._scaling = False  # Mixed precision scaling not implemented here.
-        self._optimizer = None
+    def __init__(self, name, lr, opt='adam', eps=1e-5, clip=0.0, warmup=0, wd=0.0, wd_pattern='kernel', scaling=True):
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            super().__init__()
+            assert 0 <= wd < 1, "weight decay must be in [0,1)"
+            if clip:
+                assert clip >= 1, "clip must be at least 1"
+            self._name = name
+            self._clip = clip
+            self._warmup = warmup
+            self._wd = wd
+            self._wd_pattern = wd_pattern
+            self._updates = 0
+            self._base_lr = lr
+            self._lr = lr
+            self._opt_type = opt
+            self._eps = eps
+            self._scaling = scaling  # Enable mixed precision scaling if True.
+            self._optimizer = None
+            if self._scaling:
+                self._scaler = torch.amp.GradScaler(init_scale=2.0)
 
     @property
     def variables(self):
-        return list(self.parameters())
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            return list(self.parameters())
 
     def step(self, loss, modules):
-        if not isinstance(modules, (list, tuple)):
-            modules = [modules]
-        varibs = []
-        named_params = set()
-        for module in modules:
-            varibs.extend(list(module.parameters()))
-            named_params.update(name for name, _ in module.named_parameters())
-        count = sum(np.prod(p.shape) for p in varibs)
-        if self._updates == 0:
-            print(f"Found {count} {self._name} parameters.")
-        if self._optimizer is None:
-            self.first_named_params = named_params
-            if self._opt_type == 'adam':
-                self._optimizer = torch.optim.Adam(varibs, lr=self._lr, eps=self._eps)
-            elif self._opt_type == 'sgd':
-                self._optimizer = torch.optim.SGD(varibs, lr=self._lr)
-            elif self._opt_type == 'momentum':
-                self._optimizer = torch.optim.SGD(varibs, lr=self._lr, momentum=0.9)
-            else:
-                raise NotImplementedError(self._opt_type)
-
-        assert self.first_named_params == named_params
-        self._optimizer.zero_grad()
-        loss.backward()
-        if self._clip:
-            torch.nn.utils.clip_grad_norm_(varibs, self._clip)
-        if self._wd:
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            if not isinstance(modules, (list, tuple)):
+                modules = [modules]
+            varibs = []
+            named_params = set()
             for module in modules:
-                for name, param in module.named_parameters():
-                    if re.search(self._wd_pattern, name):
-                        param.data.mul_(1 - self._wd * self._lr)
-        self._optimizer.step()
-        self._updates += 1
-        if self._warmup:
-            warmup_factor = min(self._updates / self._warmup, 1.0)
-            self._lr = self._base_lr * warmup_factor
-            for param_group in self._optimizer.param_groups:
-                param_group['lr'] = self._lr
-        total_norm = 0.0
-        for p in varibs:
-            if p.grad is not None:
-                total_norm += p.grad.data.norm(2).item() ** 2
-        total_norm = total_norm ** 0.5
-        metrics = {
-            f'{self._name}_loss': loss.item(),
-            f'{self._name}_grad_steps': self._updates,
-            f'{self._name}_grad_norm': total_norm,
-        }
-        return metrics
+                varibs.extend(list(module.parameters()))
+                named_params.update(name for name, _ in module.named_parameters())
+            count = sum(np.prod(p.shape) for p in varibs)
+            if self._updates == 0:
+                print(f"Found {count} {self._name} parameters.")
+            if self._optimizer is None:
+                self.first_named_params = named_params
+                if self._opt_type == 'adam':
+                    self._optimizer = torch.optim.Adam(varibs, lr=self._lr, eps=self._eps)
+                elif self._opt_type == 'sgd':
+                    self._optimizer = torch.optim.SGD(varibs, lr=self._lr)
+                elif self._opt_type == 'momentum':
+                    self._optimizer = torch.optim.SGD(varibs, lr=self._lr, momentum=0.9)
+                else:
+                    raise NotImplementedError(self._opt_type)
+
+            assert self.first_named_params == named_params
+            self._optimizer.zero_grad()
+
+            # Use AMP grad scaler if enabled
+            if self._scaling:
+                self._scaler.scale(loss).backward()
+                if self._clip:
+                    self._scaler.unscale_(self._optimizer)
+                    torch.nn.utils.clip_grad_norm_(varibs, self._clip)
+            else:
+                loss.backward()
+                if self._clip:
+                    torch.nn.utils.clip_grad_norm_(varibs, self._clip)
+
+            if self._wd:
+                for module in modules:
+                    for name, param in module.named_parameters():
+                        if re.search(self._wd_pattern, name):
+                            param.data.mul_(1 - self._wd * self._lr)
+
+            if self._scaling:
+                self._scaler.step(self._optimizer)
+                self._scaler.update()
+            else:
+                self._optimizer.step()
+
+            self._updates += 1
+            if self._warmup:
+                warmup_factor = min(self._updates / self._warmup, 1.0)
+                self._lr = self._base_lr * warmup_factor
+                for param_group in self._optimizer.param_groups:
+                    param_group['lr'] = self._lr
+            total_norm = 0.0
+            for p in varibs:
+                if p.grad is not None:
+                    total_norm += p.grad.data.norm(2).item() ** 2
+            total_norm = total_norm ** 0.5
+            metrics = {
+                f'{self._name}_loss': loss.item(),
+                f'{self._name}_grad_steps': self._updates,
+                f'{self._name}_grad_norm': total_norm,
+            }
+            return metrics
 
 # ---------------------------------------------------------------------------
 # Distribution Classes (wrappers)
@@ -840,3 +863,15 @@ def get_act(name):
         return getattr(torch, name)
     else:
         raise NotImplementedError(name)
+
+def trace_handler(prof: torch.profiler.profile):
+   # Prefix for file names.
+   host_name = socket.gethostname()
+   timestamp = datetime.now().strftime("%b_%d_%H_%M_%S")
+   file_prefix = f"{host_name}_{timestamp}"
+
+   # Construct the trace file.
+   # prof.export_chrome_trace(f"{file_prefix}.json.gz")
+
+   # Construct the memory timeline file.
+   prof.export_memory_timeline(f"{file_prefix}.html", device="cuda:0")

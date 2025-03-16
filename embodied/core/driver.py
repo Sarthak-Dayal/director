@@ -3,6 +3,7 @@ import collections
 import numpy as np
 
 from .convert import convert
+from ..agents.director.tfutils import recursive_detach
 
 
 class Driver:
@@ -43,6 +44,7 @@ class Driver:
 
   def _step(self, policy, step, episode):
     acts, self._state = policy(self._obs, self._state, **self._kwargs)
+    self._state = recursive_detach(self._state)
     acts['reset'] = np.zeros(len(self._env), bool)
     if self._obs['is_last'].any():
       acts = {
