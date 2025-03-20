@@ -133,7 +133,7 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args):
     # for name, values in scalars.items():
     #   logger.scalar(f'eval/{name}', np.array(values, np.float64).mean())
     logger.write()
-    with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+    with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=False):
       driver(policy, steps=args.eval_every)
     checkpoint.save()
 

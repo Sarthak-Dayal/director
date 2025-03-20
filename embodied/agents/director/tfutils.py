@@ -247,8 +247,9 @@ class Module(nn.Module):
         return mod
 
 
-class Optimizer(Module):
-    def __init__(self, name, lr, opt='adam', eps=1e-5, clip=0.0, warmup=0, wd=0.0, wd_pattern='kernel', scaling=True):
+class Optimizer(torch.nn.Module):
+    def __init__(self, name, lr, opt='adam', eps=1e-5, clip=0.0, warmup=0,
+                 wd=0.0, wd_pattern='kernel', scaling=True):
         with torch.amp.autocast(device_type="cuda", enabled=False):
             super().__init__()
             assert 0 <= wd < 1, "weight decay must be in [0,1)"
@@ -264,30 +265,52 @@ class Optimizer(Module):
             self._lr = lr
             self._opt_type = opt
             self._eps = eps
-            self._scaling = scaling  # Enable mixed precision scaling if True.
-            self._optimizer = None
+            self._scaling = scaling  # If True, do manual loss scaling.
             if self._scaling:
+                self._grad_scale = 1e1
+                self._fine_steps = 0
+                # Retain your AMP GradScaler from your original implementation.
                 self._scaler = torch.amp.GradScaler(init_scale=2.0)
+            self._optimizer = None
+            self._first_named_params = None
+            self._once = True  # For one-time logging (parameter count & weight decay)
 
     @property
     def variables(self):
         with torch.amp.autocast(device_type="cuda", enabled=False):
+            if self._optimizer is not None:
+                params = []
+                for group in self._optimizer.param_groups:
+                    params.extend(group['params'])
+                return params
             return list(self.parameters())
 
     def step(self, loss, modules):
         with torch.amp.autocast(device_type="cuda", enabled=False):
+            # Ensure modules is a list.
             if not isinstance(modules, (list, tuple)):
                 modules = [modules]
             varibs = []
             named_params = set()
             for module in modules:
                 varibs.extend(list(module.parameters()))
-                named_params.update(name for name, _ in module.named_parameters())
-            count = sum(np.prod(p.shape) for p in varibs)
-            if self._updates == 0:
-                print(f"Found {count} {self._name} parameters.")
+                for name, _ in module.named_parameters():
+                    named_params.add(name)
+            # Log total parameter count on first call.
+            if self._once:
+                total_params = sum([p.numel() for p in varibs])
+                print(f"Found {total_params} {self._name} parameters.")
+
+            metrics = {}
+
+            # Check loss numerics.
+            if not torch.isfinite(loss):
+                raise ValueError(f"{self._name} loss is not finite: {loss.item()}")
+            metrics[f'{self._name}_loss'] = loss.item()
+
+            # Create the optimizer on the first call.
             if self._optimizer is None:
-                self.first_named_params = named_params
+                self._first_named_params = named_params
                 if self._opt_type == 'adam':
                     self._optimizer = torch.optim.Adam(varibs, lr=self._lr, eps=self._eps)
                 elif self._opt_type == 'sgd':
@@ -296,49 +319,98 @@ class Optimizer(Module):
                     self._optimizer = torch.optim.SGD(varibs, lr=self._lr, momentum=0.9)
                 else:
                     raise NotImplementedError(self._opt_type)
+            else:
+                # Ensure parameter set consistency.
+                assert self._first_named_params == named_params, "Module parameters changed!"
 
-            assert self.first_named_params == named_params
             self._optimizer.zero_grad()
 
-            # Use AMP grad scaler if enabled
+            # ----- Loss Scaling and Backward Pass -----
+            overflow = False  # Flag to track if any gradient is non-finite.
             if self._scaling:
-                self._scaler.scale(loss).backward()
-                if self._clip:
-                    self._scaler.unscale_(self._optimizer)
-                    torch.nn.utils.clip_grad_norm_(varibs, self._clip)
+                scaled_loss = self._grad_scale * loss
+                scaled_loss.backward()
+                # Unscale gradients manually.
+                for p in varibs:
+                    if p.grad is not None:
+                        p.grad.data.div_(self._grad_scale)
             else:
                 loss.backward()
-                if self._clip:
-                    torch.nn.utils.clip_grad_norm_(varibs, self._clip)
 
-            if self._wd:
-                for module in modules:
-                    for name, param in module.named_parameters():
-                        if re.search(self._wd_pattern, name):
-                            param.data.mul_(1 - self._wd * self._lr)
-
+            # ----- Overflow Checking and Grad Scale Update -----
             if self._scaling:
-                self._scaler.step(self._optimizer)
-                self._scaler.update()
-            else:
-                self._optimizer.step()
+                for p in varibs:
+                    if p.grad is not None:
+                        if not torch.all(torch.isfinite(p.grad)):
+                            overflow = True
+                            break
 
-            self._updates += 1
-            if self._warmup:
-                warmup_factor = min(self._updates / self._warmup, 1.0)
-                self._lr = self._base_lr * warmup_factor
-                for param_group in self._optimizer.param_groups:
-                    param_group['lr'] = self._lr
+                if not overflow:
+                    if self._fine_steps < 1000:
+                        self._fine_steps += 1
+                        new_scale = self._grad_scale  # Keep same scale.
+                    else:
+                        self._fine_steps = 0
+                        new_scale = self._grad_scale * 2  # Double scale after 1000 fine steps.
+                else:
+                    self._fine_steps = 0
+                    new_scale = self._grad_scale / 2  # Halve scale on overflow.
+
+                self._grad_scale = max(1e-4, min(new_scale, 1e4))
+                metrics[f'{self._name}_grad_scale'] = self._grad_scale
+                metrics[f'{self._name}_grad_overflow'] = float(overflow)
+
+            # ----- Gradient Clipping -----
             total_norm = 0.0
             for p in varibs:
                 if p.grad is not None:
-                    total_norm += p.grad.data.norm(2).item() ** 2
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
             total_norm = total_norm ** 0.5
-            metrics = {
-                f'{self._name}_loss': loss.item(),
-                f'{self._name}_grad_steps': self._updates,
-                f'{self._name}_grad_norm': total_norm,
-            }
+            if self._clip:
+                torch.nn.utils.clip_grad_norm_(varibs, self._clip)
+            if self._scaling and not torch.isfinite(torch.tensor(total_norm)):
+                total_norm = float('nan')
+            metrics[f'{self._name}_grad_norm'] = total_norm
+
+            # ----- Weight Decay (with Logging) -----
+            if self._wd and not overflow:
+                current_lr = self._lr
+                log = (self._wd_pattern != r'.*') and self._once
+                included, excluded = [], []
+                for module in modules:
+                    for name, param in module.named_parameters():
+                        full_name = self._name + '/' + name
+                        # Use __import__('re') to call regex functions.
+                        if __import__('re').search(self._wd_pattern, full_name):
+                            param.data.mul_(1 - self._wd * current_lr)
+                            included.append(full_name)
+                        else:
+                            excluded.append(full_name)
+                if log:
+                    print(f"Optimizer applied weight decay to {self._name} variables:")
+                    for nm in included:
+                        print(f'[x] {nm}')
+                    for nm in excluded:
+                        print(f'[ ] {nm}')
+                    print('')
+
+            # ----- Apply Gradients and Update LR if No Overflow -----
+            if not overflow:
+                self._optimizer.step()
+                self._updates += 1
+                metrics[f'{self._name}_grad_steps'] = self._updates
+                if self._warmup:
+                    warmup_factor = min(self._updates / self._warmup, 1.0)
+                    self._lr = self._base_lr * warmup_factor
+                    for param_group in self._optimizer.param_groups:
+                        param_group['lr'] = self._lr
+            else:
+                metrics[f'{self._name}_grad_steps'] = self._updates
+
+            # Mark that one-time logging has been completed.
+            self._once = False
+
             return metrics
 
 # ---------------------------------------------------------------------------
