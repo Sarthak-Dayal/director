@@ -63,9 +63,10 @@ class Disag(tfutils.Module):  # tfutils.Module is assumed to be a subclass of nn
         for head in self.nets_torch:
             pred_dist = head(inp)
             loss = loss - pred_dist.log_prob(target).mean()
-        self.opt.step(loss, self.nets_torch)
+        metrics = {'disag_loss': loss.item()}
+        metrics.update(self.opt.step(loss, self.nets_torch))
         # Optionally, you can return loss.item() or a dictionary of metrics.
-        return {'disag_loss': loss.item()}
+        return metrics
 
 # ---------------------------------------------------------------------------
 # LatentVAE: A latent variational autoencoder module.
@@ -120,7 +121,7 @@ class LatentVAE(tfutils.Module):
         ll = self.dec(self.flatten(sample)).log_prob(target)
         assert kl.shape == ll.shape, "Shape mismatch between KL and log-likelihood"
         loss = (kl - ll).mean()
-        self.opt.step(loss, [self.enc, self.dec])
+        metrics.update(self.opt.step(loss, [self.enc, self.dec]))
         metrics['vae_kl'] = kl.mean().item()
         metrics['vae_ll'] = ll.mean().item()
         metrics['vae_loss'] = loss.item()
@@ -152,7 +153,7 @@ class CtrlDisag(tfutils.Module):
         # Here we assume that self.head accepts a dict input.
         dist = self.head({'current': ctrl[:, :-1], 'next': ctrl[:, 1:]})
         loss = -dist.log_prob(data['action'][:, 1:]).mean()
-        self.opt.step(loss, [self.embed, self.head])
+        metrics.update(self.opt.step(loss, [self.embed, self.head]))
         metrics['ctrl_loss'] = loss.item()
         # Also train the underlying disag module using the embedded ctrl features.
         new_data = dict(data)

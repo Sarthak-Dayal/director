@@ -161,7 +161,7 @@ class WorldModel(Module):
         super(WorldModel, self).train()  # set module to training mode
         loss, state, outputs, metrics = self.loss(data, state, training=True)
         modules = [self.encoder, self.rssm, *self.heads.values()]
-        self.model_opt.step(loss, modules)
+        metrics.update(self.model_opt.step(loss, modules))
         state = recursive_detach(state)
         outputs = recursive_detach(outputs)
         return state, outputs, metrics
@@ -359,7 +359,7 @@ class ImagActorCritic(Module):
         loss, mets = self.loss(traj, score_sum)
         metrics.update(mets)
         loss = loss.mean()
-        self.opt.step(loss, [self.actor])
+        metrics.update(self.opt.step(loss, [self.actor]))
         return metrics
 
     def loss(self, traj, score):
@@ -412,7 +412,7 @@ class VFunction(Module):
         target, _ = self.target(traj, reward, self.config.critic_return)
         dist = self.net({k: v[:-1] for k, v in traj.items()})
         loss = -(dist.log_prob(target) * traj['weight'][:-1]).mean()
-        self.opt.step(loss, [self.net])
+        metrics.update(self.opt.step(loss, [self.net]))
         metrics.update({
             'critic_loss': loss.item(),
             'imag_reward_mean': reward.mean().item(),
@@ -490,7 +490,7 @@ class QFunction(Module):
         inps = {k: v[:-1] for k, v in traj.items()}
         dist = self.net(inps)
         loss = -(dist.log_prob(target) * traj['weight'][:-1]).mean()
-        self.opt.step(loss,[self.net])
+        metrics.update(self.opt.step(loss,[self.net]))
         metrics.update({
             'imag_reward_mean': reward.mean().item(),
             'imag_reward_std': reward.std().item(),
@@ -569,7 +569,7 @@ class TwinQFunction(Module):
         loss2 = -(dist2.log_prob(target) * traj['weight'][:-1]).mean()
         loss = loss1 + loss2
         modules = [self.net1, self.net2]
-        self.opt.step(loss, modules)
+        metrics.update(self.opt.step(loss, modules))
         metrics.update({
             'imag_reward_mean': reward.mean().item(),
             'imag_reward_std': reward.std().item(),

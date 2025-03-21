@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as td
 
-from embodied.agents.director.tfutils import BernoulliDist
+from embodied.agents.director.tfutils import BernoulliDist, clone_tensors_recursive
 # Import our common helper functions and classes from tfutils
 from tfutils import Module, SymlogDist, MSEDist, scan, map_structure, get_act, Input, tensor, symlog, symexp, \
     OneHotDist, NormalDist

@@ -1,6 +1,7 @@
 # tfutils.py
 from datetime import datetime
 import socket
+from typing import Mapping, Sequence
 
 import numpy as np
 import torch
@@ -70,6 +71,25 @@ def shuffle(x, axis):
     for i, j in enumerate(perm):
         inv_perm[j] = i
     return x_shuffled.permute(inv_perm)
+
+def clone_tensors_recursive(data):
+    """
+    Recursively clones tensors inside a container while preserving the computation graph.
+
+    Args:
+        data: A tensor, list, tuple, or dictionary containing tensors.
+
+    Returns:
+        A structure of the same type with cloned tensors.
+    """
+    if isinstance(data, torch.Tensor):
+        return data.clone().requires_grad_(data.requires_grad)
+    elif isinstance(data, Mapping):  # Handles dict-like structures
+        return {key: clone_tensors_recursive(value) for key, value in data.items()}
+    elif isinstance(data, Sequence) and not isinstance(data, (str, bytes)):  # Handles lists, tuples
+        return type(data)(clone_tensors_recursive(item) for item in data)
+    else:
+        return data  # Return non-tensor values as-is
 
 def scan(fn, inputs, start, static=True, reverse=False, axis=0):
     """
@@ -229,6 +249,9 @@ class Module(nn.Module):
         # If already registered as a submodule, return it.
         if name in self._modules:
             return self._modules[name]
+
+        if name in self._parameters:
+            return self._parameters[name]
 
         # If the constructor takes a 'name' argument, pass the name.
         if 'name' in inspect.signature(ctor).parameters:
