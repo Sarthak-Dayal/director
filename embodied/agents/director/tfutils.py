@@ -258,14 +258,15 @@ class Module(nn.Module):
             kwargs['name'] = name
 
         # Create the module or tensor.
-        mod = ctor(*args, **kwargs)
+        mod = ctor(*args, **kwargs).cuda()
 
         # If it's an nn.Module, register it. Otherwise, if it's a tensor, wrap it as a parameter.
-        if isinstance(mod, nn.Module):
-            setattr(self, name, mod)
-        else:
-            mod = nn.Parameter(mod) if isinstance(mod, torch.Tensor) else mod
-            setattr(self, name, mod)
+        # if isinstance(mod, nn.Module):
+        #     setattr(self, name, mod)
+        # else:
+        #     mod = nn.Parameter(mod) if isinstance(mod, torch.Tensor) else mod
+        #     setattr(self, name, mod)
+        setattr(self, name, mod)
 
         return mod
 
@@ -632,55 +633,33 @@ class SymlogDist(td.Distribution):
         return type(self)(new_mode, self._dims, self._agg, validate_args=self._validate_args)
 
 
-# One-hot categorical distribution using Gumbel-Softmax.
-class OneHotDist(td.OneHotCategorical):
-    has_rsample = True
 
-    def __init__(self, logits=None, probs=None, dtype=torch.float32, validate_args=None):
-        # When both are provided, broadcasting is done by the parent.
-        self._dtype = dtype
-        self._validate_args = validate_args
-        super().__init__(logits=logits, probs=probs, validate_args=validate_args)
-
-    @property
-    def batch_shape(self):
-        if self.logits is not None:
-            return self.logits.shape[:-1]
+class OneHotDist(td.one_hot_categorical.OneHotCategorical):
+    def __init__(self, logits=None, probs=None, unimix_ratio=0.0):
+        if logits is not None and unimix_ratio > 0.0:
+            probs = F.softmax(logits, dim=-1)
+            probs = probs * (1.0 - unimix_ratio) + unimix_ratio / probs.shape[-1]
+            logits = torch.log(probs)
+            super().__init__(logits=logits, probs=None)
         else:
-            return self.probs.shape[:-1]
+            super().__init__(logits=logits, probs=probs)
 
-    @property
-    def event_shape(self):
-        if self.logits is not None:
-            return self.logits.shape[-1:]
-        else:
-            return self.probs.shape[-1:]
-
-    @property
-    def mean(self):
-        return self.probs
-
-    @property
     def mode(self):
-        return self.probs
+        _mode = F.one_hot(
+            torch.argmax(super().logits, axis=-1), super().logits.shape[-1]
+        )
+        return _mode.detach() + super().logits - super().logits.detach()
 
-    def rsample(self, sample_shape=torch.Size()):
-        logits = self.logits
-        if sample_shape:
-            logits = logits.expand(sample_shape + logits.shape)
-        sample = F.gumbel_softmax(logits, tau=1.0, hard=False, dim=-1)
-        return sample.to(self._dtype)
+    def sample(self, sample_shape=(), seed=None):
+        if seed is not None:
+            raise ValueError("need to check")
+        sample = super().sample(sample_shape).detach()
+        probs = super().probs
+        while len(probs.shape) < len(sample.shape):
+            probs = probs[None]
+        sample += probs - probs.detach()
+        return sample
 
-    def sample(self, sample_shape=torch.Size()):
-        return self.rsample(sample_shape)
-
-    def expand(self, batch_shape, _instance=None):
-        if self.logits is not None:
-            new_logits = self.logits.expand(batch_shape + self.event_shape)
-            return type(self)(logits=new_logits, dtype=self._dtype, validate_args=self._validate_args)
-        else:
-            new_probs = self.probs.expand(batch_shape + self.event_shape)
-            return type(self)(probs=new_probs, dtype=self._dtype, validate_args=self._validate_args)
 
 class NormalDist(td.Normal):
     arg_constraints = {'loc': td.constraints.real, 'scale': td.constraints.positive}

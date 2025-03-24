@@ -443,8 +443,8 @@ class Conv2D(Module):
     def forward(self, hidden):
         if hidden.dim() == 4:
             hidden = hidden.permute(0, 3, 1, 2)
-        if self.layer.in_channels == 0:
-            self.layer.in_channels = hidden.shape[1]
+        # if self.layer.in_channels == 0:
+        #     self.layer.in_channels = hidden.shape[1]
         hidden = self.layer(hidden)
         hidden = self.norm(hidden)
         hidden = self.act(hidden)
