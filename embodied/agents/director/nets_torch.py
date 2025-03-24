@@ -428,7 +428,7 @@ class Conv2D(Module):
         super().__init__()
         self.transp = transp
         self.act = get_act(act)
-        self.norm = Norm(norm)
+        # self.norm = Norm(norm)
         self.pad = pad
         self.stride = stride
         self.depth = depth
@@ -446,7 +446,7 @@ class Conv2D(Module):
         # if self.layer.in_channels == 0:
         #     self.layer.in_channels = hidden.shape[1]
         hidden = self.layer(hidden)
-        hidden = self.norm(hidden)
+        # hidden = self.norm(hidden)
         hidden = self.act(hidden)
         hidden = hidden.permute(0, 2, 3, 1)
         return hidden

@@ -258,7 +258,7 @@ class Module(nn.Module):
             kwargs['name'] = name
 
         # Create the module or tensor.
-        mod = ctor(*args, **kwargs).cuda()
+        mod = ctor(*args, **kwargs)
 
         # If it's an nn.Module, register it. Otherwise, if it's a tensor, wrap it as a parameter.
         # if isinstance(mod, nn.Module):
