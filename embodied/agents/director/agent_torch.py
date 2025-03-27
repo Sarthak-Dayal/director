@@ -338,10 +338,10 @@ class ImagActorCritic(Module):
         metrics = self.update(traj)
         return traj, metrics
 
-    def update(self, traj):
+    def update(self, traj, retain_graph=False):
         metrics = {}
         for key, critic in self.critics.items():
-            mets = critic.train(traj, self.actor)
+            mets = critic.train(traj, self.actor, retain_graph=True)
             for k, v in mets.items():
                 metrics[f'{key}_{k}'] = v
         scores = []
@@ -359,7 +359,7 @@ class ImagActorCritic(Module):
         loss, mets = self.loss(traj, score_sum)
         metrics.update(mets)
         loss = loss.mean()
-        metrics.update(self.opt.step(loss, [self.actor]))
+        metrics.update(self.opt.step(loss, [self.actor], retain_graph=retain_graph))
         return metrics
 
     def loss(self, traj, score):
@@ -406,13 +406,13 @@ class VFunction(Module):
             self.target_net = self.net
         self.opt = Optimizer('critic', **self.config.critic_opt)
 
-    def train(self, traj, actor):
+    def train(self, traj, actor, retain_graph=False):
         metrics = {}
         reward = self.rewfn(traj)
         target, _ = self.target(traj, reward, self.config.critic_return)
         dist = self.net({k: v[:-1] for k, v in traj.items()})
         loss = -(dist.log_prob(target) * traj['weight'][:-1]).mean()
-        metrics.update(self.opt.step(loss, [self.net]))
+        metrics.update(self.opt.step(loss, [self.net], retain_graph=retain_graph))
         metrics.update({
             'critic_loss': loss.item(),
             'imag_reward_mean': reward.mean().item(),
@@ -483,14 +483,14 @@ class QFunction(Module):
         baseline = torch.zeros_like(ret)
         return ret, baseline
 
-    def train_q(self, traj, actor):
+    def train_q(self, traj, actor, retain_graph=False):
         metrics = {}
         reward = self.rewfn(traj)
         target = self.target(traj, actor, reward).detach()
         inps = {k: v[:-1] for k, v in traj.items()}
         dist = self.net(inps)
         loss = -(dist.log_prob(target) * traj['weight'][:-1]).mean()
-        metrics.update(self.opt.step(loss,[self.net]))
+        metrics.update(self.opt.step(loss,[self.net], retain_graph=retain_graph))
         metrics.update({
             'imag_reward_mean': reward.mean().item(),
             'imag_reward_std': reward.std().item(),
@@ -557,7 +557,7 @@ class TwinQFunction(Module):
         baseline = torch.zeros_like(ret)
         return ret, baseline
 
-    def train(self, traj, actor):
+    def train(self, traj, actor, retain_graph=False):
         metrics = {}
         reward = self.rewfn(traj)
         target = self.target(traj, actor, reward).detach()
@@ -569,7 +569,7 @@ class TwinQFunction(Module):
         loss2 = -(dist2.log_prob(target) * traj['weight'][:-1]).mean()
         loss = loss1 + loss2
         modules = [self.net1, self.net2]
-        metrics.update(self.opt.step(loss, modules))
+        metrics.update(self.opt.step(loss, modules, retain_graph=retain_graph))
         metrics.update({
             'imag_reward_mean': reward.mean().item(),
             'imag_reward_std': reward.std().item(),

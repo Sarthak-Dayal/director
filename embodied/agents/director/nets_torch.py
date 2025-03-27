@@ -428,7 +428,7 @@ class Conv2D(Module):
         super().__init__()
         self.transp = transp
         self.act = get_act(act)
-        # self.norm = Norm(norm)
+        self.norm = Norm(norm)
         self.pad = pad
         self.stride = stride
         self.depth = depth
@@ -443,10 +443,10 @@ class Conv2D(Module):
     def forward(self, hidden):
         if hidden.dim() == 4:
             hidden = hidden.permute(0, 3, 1, 2)
-        # if self.layer.in_channels == 0:
-        #     self.layer.in_channels = hidden.shape[1]
+        if self.layer.in_channels == 0:
+            self.layer.in_channels = hidden.shape[1]
         hidden = self.layer(hidden)
-        # hidden = self.norm(hidden)
+        hidden = self.norm(hidden)
         hidden = self.act(hidden)
         hidden = hidden.permute(0, 2, 3, 1)
         return hidden
@@ -489,29 +489,53 @@ class Dense(Module):
 # ---------------------------
 # Norm
 # ---------------------------
-class Norm(Module, nn.Module):
+
+class Norm(nn.Module):
     def __init__(self, impl):
         super().__init__()
-        self._impl = impl
-        if impl == 'keras':
-            self.layer = nn.LayerNorm(normalized_shape=0)
-        elif impl == 'layer':
-            self.scale = None
-            self.offset = None
+        self.impl = impl
+        self.layer = None
+        self.scale = None
+        self.offset = None
 
     def forward(self, x):
-        if self._impl == 'none':
+        if self.impl == 'none':
             return x
-        elif self._impl == 'keras':
-            if self.layer.normalized_shape == 0:
-                self.layer.normalized_shape = x.shape[-1]
+        elif self.impl == 'keras':  # Equivalent to LayerNorm in PyTorch
+            if self.layer is None:
+                # Determine the normalization dimension based on input shape
+                if len(x.shape) == 4:  # Image case (N, C, H, W)
+                    self.layer = nn.LayerNorm(x.shape[1:])  # Normalize over C,H,W
+                elif len(x.shape) == 2:  # MLP case (N, features)
+                    self.layer = nn.LayerNorm(x.shape[-1])  # Normalize over features
             return self.layer(x)
-        elif self._impl == 'layer':
+        elif self.impl == 'layer':  # Custom batch normalization
             if self.scale is None:
-                self.scale = nn.Parameter(torch.ones(x.shape[-1], device=x.device))
-                self.offset = nn.Parameter(torch.zeros(x.shape[-1], device=x.device))
-            mean = x.mean(dim=-1, keepdim=True)
-            var = x.var(dim=-1, keepdim=True, unbiased=False)
-            return (x - mean) / torch.sqrt(var + 1e-3) * self.scale + self.offset
+                # Initialize parameters when we first see the input shape
+                if len(x.shape) == 4:  # Image case
+                    num_features = x.shape[1]  # channels
+                else:  # MLP case
+                    num_features = x.shape[-1]  # features
+
+                self.scale = nn.Parameter(torch.ones(num_features)).cuda()
+                self.offset = nn.Parameter(torch.zeros(num_features)).cuda()
+
+            # Calculate mean and variance
+            if len(x.shape) == 4:  # Image case
+                # Normalize across N,H,W for each channel
+                mean = x.mean(dim=[0, 2, 3], keepdim=True)
+                var = x.var(dim=[0, 2, 3], keepdim=True, unbiased=False)
+            else:  # MLP case
+                # Normalize across batch dimension
+                mean = x.mean(dim=0, keepdim=True)
+                var = x.var(dim=0, keepdim=True, unbiased=False)
+
+            # Manual batch normalization
+            epsilon = 1e-3
+            normalized = (x - mean) / torch.sqrt(var + epsilon)
+            if len(x.shape) == 4:
+                return normalized * self.scale.view(1, -1, 1, 1) + self.offset.view(1, -1, 1, 1)
+            else:
+                return normalized * self.scale + self.offset
         else:
-            raise NotImplementedError(self._impl)
+            raise NotImplementedError(f"Unknown implementation: {self.impl}")

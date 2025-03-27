@@ -210,6 +210,24 @@ def balance_stats(dist, target, thres):
         pred=pred_mean.detach().cpu().item(),
     )
 
+def snapshot_tensor_versions(tensor_dict):
+    """
+    Recursively walks through a (possibly nested) dictionary and records the _version of each tensor.
+    Returns a flat dict mapping unique keys to version numbers.
+    """
+    versions = {}
+    
+    def _walk(d, prefix=''):
+        for k, v in d.items():
+            name = f"{prefix}.{k}" if prefix else k
+            if isinstance(v, torch.Tensor):
+                versions[name] = v._version
+            elif isinstance(v, dict):
+                _walk(v, name)
+            # You can extend this to lists/tuples if needed.
+    
+    _walk(tensor_dict)
+    return versions
 # ---------------------------------------------------------------------------
 # Core Module and Optimizer Classes
 # ---------------------------------------------------------------------------
@@ -309,7 +327,7 @@ class Optimizer(torch.nn.Module):
                 return params
             return list(self.parameters())
 
-    def step(self, loss, modules):
+    def step(self, loss, modules, retain_graph=False):
         with torch.amp.autocast(device_type="cuda", enabled=False):
             # Ensure modules is a list.
             if not isinstance(modules, (list, tuple)):
@@ -353,13 +371,13 @@ class Optimizer(torch.nn.Module):
             overflow = False  # Flag to track if any gradient is non-finite.
             if self._scaling:
                 scaled_loss = self._grad_scale * loss
-                scaled_loss.backward()
+                scaled_loss.backward(retain_graph=retain_graph)
                 # Unscale gradients manually.
                 for p in varibs:
                     if p.grad is not None:
                         p.grad.data.div_(self._grad_scale)
             else:
-                loss.backward()
+                loss.backward(retain_graph=retain_graph)
 
             # ----- Overflow Checking and Grad Scale Update -----
             if self._scaling:

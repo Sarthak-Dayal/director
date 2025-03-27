@@ -19,6 +19,7 @@ from tfutils import map_structure, tensor, scan, recursive_detach  # our helper 
 class Hierarchy(tfutils.Module):
     def __init__(self, wm, act_space, config):
         super().__init__()
+        self.DEBUG = True
         self.wm = wm
         self.config = config
         self.extr_reward = lambda traj: self.wm.heads['reward'](traj).mean[1:]
@@ -77,7 +78,56 @@ class Hierarchy(tfutils.Module):
         self.dec = nets_torch.MLP(self.goal_shape, dims='context', **config.goal_decoder)
         self.kl = tfutils.AutoAdapt((), **config.encdec_kl)
         self.opt = tfutils.Optimizer('goal', **config.encdec_opt)
+    
+    # VAE recon test
+    def vae_report(self, data):
+        report = {}
+        
+        with torch.no_grad():
+            # World model encoding
+            encoded = self.wm.encoder(data)
+            context, _ = self.wm.rssm.observe(
+                encoded[:6, :5], data['action'][:6, :5], data['is_first'][:6, :5])
+            
+            # Feature extraction and VAE processing
+            feat = self.feat(context).float()
+            
+            # Replace manager with encoder-based skill generation
+            if 'context' in self.config.goal_decoder.inputs:
+                if self.config.vae_span:
+                    ctx_feat = feat[:, 0]
+                    goal_feat = feat[:, -1]
+                else:
+                    assert feat.shape[1] > self.config.train_skill_duration
+                    ctx_feat = feat[:, :-self.config.train_skill_duration]
+                    goal_feat = feat[:, self.config.train_skill_duration:]
+            else:
+                ctx_feat = goal_feat = feat
+                
+            enc = self.enc({'goal': goal_feat, 'context': ctx_feat})
+            skill = enc.sample()
+            goal = self.dec({'skill': skill, 'context': ctx_feat}).mode
+            if self.config.manager_delta:
+                goal = ctx_feat + goal
 
+            # Reconstruction and metrics
+            recon_state = {'deter': goal, 'stoch': self.wm.rssm.get_stoch(goal)}
+            recon = self.wm.heads['decoder'](recon_state)
+            
+            truth = data['image'][:6, :5].float()
+            model = recon['image'].mode
+            mse = F.mse_loss(model, truth)
+            psnr = 10 * torch.log10(1/mse)
+            error = (model - truth + 1)/2
+            
+            report.update({
+                'vae_recon/mse': mse,
+                'vae_recon/psnr': psnr,
+                'vae_recon/video': tfutils.video_grid(torch.cat([truth, model, error], 3)),
+            })
+            
+        return report
+            
     def initial(self, batch_size):
         return {
             'step': torch.zeros(batch_size, dtype=torch.int64),
@@ -168,10 +218,10 @@ class Hierarchy(tfutils.Module):
             traj['reward_expl'] = self.expl_reward(traj)
             traj['reward_goal'] = self.goal_reward(traj)
             traj['delta'] = traj['goal'] - self.feat(traj).to(torch.float32)
-            traj = recursive_detach(traj)
+            # traj = recursive_detach(traj)
             wtraj = self.split_traj(traj)
             mtraj = self.abstract_traj(traj)
-        worker_mets = self.worker.update(wtraj)
+        worker_mets = self.worker.update(wtraj, retain_graph=True)
         metrics.update({f'worker_{k}': v for k, v in worker_mets.items()})
         manager_mets = self.manager.update(mtraj)
         metrics.update({f'manager_{k}': v for k, v in manager_mets.items()})
@@ -510,6 +560,9 @@ class Hierarchy(tfutils.Module):
         for impl in ('manager', 'prior', 'replay'):
             for key, video in self.report_worker(data, impl).items():
                 report[f'impl_{impl}_{key}'] = video
+        
+        if self.DEBUG:
+            report.update(self.vae_report(data))
         return report
 
     def report_worker(self, data, impl):
