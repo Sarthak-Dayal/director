@@ -139,7 +139,7 @@ class Hierarchy(tfutils.Module):
         # Determine duration based on whether we are imagining rollout.
         duration = self.config.train_skill_duration if imag else self.config.env_skill_duration
         # Use map_structure to detach.
-        sg = lambda x: map_structure(lambda y: y.detach(), x)
+        sg = recursive_detach
         update = (carry['step'] % duration == 0)  # Boolean tensor of shape [batch]
         # switch(x, y): for each sample, select x if update==False, y if update==True.
         switch = lambda x, y: (
@@ -223,7 +223,7 @@ class Hierarchy(tfutils.Module):
             mtraj = self.abstract_traj(traj)
         worker_mets = self.worker.update(wtraj, retain_graph=True)
         metrics.update({f'worker_{k}': v for k, v in worker_mets.items()})
-        manager_mets = self.manager.update(mtraj)
+        manager_mets = self.manager.update(mtraj, retain_graph=False)
         metrics.update({f'manager_{k}': v for k, v in manager_mets.items()})
         return traj, metrics
 
