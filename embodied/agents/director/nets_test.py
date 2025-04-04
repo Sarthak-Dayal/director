@@ -79,6 +79,62 @@ def analyze_model_gradients(model):
     # model.zero_grad()
     # print("All gradients have been zeroed.")
 
+
+def analyze_tensor_gradients(tensor_dict, prefix=""):
+    """
+    Recursively analyze the gradients of tensors in a nested dictionary.
+
+    For each tensor found, the function checks its .grad attribute:
+      - If grad is None, it prints "None"
+      - If grad exists but is all zeros, it prints "All Zeros"
+      - Otherwise, it prints summary statistics (mean, std, min, max)
+
+    Args:
+        tensor_dict (dict): A dictionary where some values are torch.Tensors.
+        prefix (str): A prefix used to build hierarchical keys.
+    """
+    for key, value in tensor_dict.items():
+        full_key = f"{prefix}.{key}" if prefix else key
+
+        if isinstance(value, dict):
+            analyze_tensor_gradients(value, prefix=full_key)
+        elif torch.is_tensor(value):
+            grad = getattr(value, "grad", None)
+            if grad is None:
+                status = "\033[93mNone\033[0m"
+                print(f"{full_key:<50} : Grad = {status}")
+            elif torch.all(grad == 0):
+                status = "\033[91mAll Zeros\033[0m"
+                print(f"{full_key:<50} : Grad = {status}")
+            else:
+                # Convert to float for statistics if necessary.
+                grad_float = grad.float() if not torch.is_floating_point(grad) else grad
+                stats = {
+                    "mean": grad_float.mean().item(),
+                    "std": grad_float.std().item(),
+                    "min": grad_float.min().item(),
+                    "max": grad_float.max().item(),
+                }
+                print(f"{full_key:<50} : Grad = \033[92mOK\033[0m")
+                print(f"{'':<52}   mean: {stats['mean']:.4e}, std: {stats['std']:.4e}, "
+                      f"min: {stats['min']:.4e}, max: {stats['max']:.4e}")
+        else:
+            # If not a tensor, optionally skip or note the type.
+            print(f"{full_key:<50} : \033[90m({type(value).__name__})\033[0m - Skipped")
+
+def enable_grad_tracking(x):
+    if isinstance(x, torch.Tensor):
+        if not x.requires_grad:
+            x.requires_grad_()
+        x.retain_grad()
+        return x
+    elif isinstance(x, dict):
+        return {k: enable_grad_tracking(v) for k, v in x.items()}
+    elif isinstance(x, (list, tuple)):
+        return type(x)(enable_grad_tracking(v) for v in x)
+    else:
+        return x  # Leave other types untouched
+
 def test_image_vae():
     parsed, other = embodied.Flags(
         configs=['defaults'], actor_id=0, actors=0,

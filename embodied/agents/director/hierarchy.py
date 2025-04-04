@@ -149,6 +149,7 @@ class Hierarchy(tfutils.Module):
         skill = sg(switch(carry['skill'], self.manager.actor(sg(latent)).sample()))
         new_goal = self.dec({'skill': skill, 'context': self.feat(latent)}).mode
         new_goal = (self.feat(latent).to(torch.float32) + new_goal) if self.config.manager_delta else new_goal
+        new_goal = torch.zeros_like(new_goal)
         goal = sg(switch(carry['goal'], new_goal))
         delta = goal - self.feat(latent).to(torch.float32)
         # Build input for the worker.
@@ -221,10 +222,11 @@ class Hierarchy(tfutils.Module):
             # traj = recursive_detach(traj)
             wtraj = self.split_traj(traj)
             mtraj = self.abstract_traj(traj)
-        worker_mets = self.worker.update(wtraj, retain_graph=True)
-        metrics.update({f'worker_{k}': v for k, v in worker_mets.items()})
-        manager_mets = self.manager.update(mtraj, retain_graph=False)
+        manager_mets = self.manager.update(mtraj)
         metrics.update({f'manager_{k}': v for k, v in manager_mets.items()})
+        worker_mets = self.worker.update(wtraj)
+        metrics.update({f'worker_{k}': v for k, v in worker_mets.items()})
+
         return traj, metrics
 
     def train_jointly_old(self, imagine, start):

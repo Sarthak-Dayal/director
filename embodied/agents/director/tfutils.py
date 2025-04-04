@@ -599,56 +599,33 @@ class DirDist(td.Independent):
 
 
 # Symlog distribution.
-class SymlogDist(td.Distribution):
-    arg_constraints = {}
-    support = td.constraints.real
-    has_rsample = True
+class SymlogDist:
 
-    def __init__(self, mode, dims, agg='sum', validate_args=None):
+    def __init__(self, mode, dims, agg='sum'):
         self._mode = mode
-        self._dims = dims  # number of event dimensions.
+        self._dims = tuple([-x for x in range(1, dims + 1)])
         self._agg = agg
-        self._axes = tuple(-i for i in range(1, dims + 1))
-        self._validate_args = validate_args
-        super().__init__(validate_args=validate_args)
-
-    @property
-    def batch_shape(self):
-        return self._mode.shape[:-self._dims] if self._dims > 0 else self._mode.shape
-
-    @property
-    def event_shape(self):
-        return self._mode.shape[-self._dims:] if self._dims > 0 else torch.Size()
-
-    @property
-    def mean(self):
-        return symexp(self._mode)
+        self.batch_shape = mode.shape[:len(mode.shape) - dims]
+        self.event_shape = mode.shape[len(mode.shape) - dims:]
 
     @property
     def mode(self):
         return symexp(self._mode)
 
-    def rsample(self, sample_shape=torch.Size()):
-        return symexp(self._mode).expand(sample_shape + self._mode.shape)
-
-    def sample(self, sample_shape=torch.Size()):
-        return self.rsample(sample_shape)
+    @property
+    def mean(self):
+        return symexp(self._mode)
 
     def log_prob(self, value):
-        if self._mode.shape != value.shape:
-            raise ValueError(f"Shape mismatch: {self._mode.shape} vs {value.shape}")
+        assert self._mode.shape == value.shape, (self._mode.shape, value.shape)
         distance = (self._mode - symlog(value)) ** 2
         if self._agg == 'mean':
-            loss = distance.mean(dim=self._axes)
+          loss = distance.mean(self._dims)
         elif self._agg == 'sum':
-            loss = distance.sum(dim=self._axes)
+          loss = distance.sum(self._dims)
         else:
-            raise NotImplementedError(self._agg)
+          raise NotImplementedError(self._agg)
         return -loss
-
-    def expand(self, batch_shape, _instance=None):
-        new_mode = self._mode.expand(batch_shape + self.event_shape)
-        return type(self)(new_mode, self._dims, self._agg, validate_args=self._validate_args)
 
 
 

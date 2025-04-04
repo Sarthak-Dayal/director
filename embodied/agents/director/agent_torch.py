@@ -456,8 +456,9 @@ class VFunction(Module):
         if self.updates == -1 or self.updates >= self.config.slow_target_update:
             self.updates = 0
             mix = 1.0 if self.updates == 0 else self.config.slow_target_fraction
-            for s, d in zip(self.net.parameters(), self.target_net.parameters()):
-                d.data.copy_(mix * s.data + (1 - mix) * d.data)
+            with torch.no_grad():
+                for s, d in zip(self.net.parameters(), self.target_net.parameters()):
+                    d.copy_(mix * s + (1 - mix) * d)
         self.updates += 1
 
 class QFunction(Module):
