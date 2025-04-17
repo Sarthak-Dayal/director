@@ -12,9 +12,10 @@ from .tfutils import OneHotDist
 
 class Greedy(tfutils.Module):
     def __init__(self, wm, act_space, config):
-        # Define a reward function that uses the world model's reward head.
-        # Note: [1:] is used to ignore the first timestep.
-        rewfn = lambda s: wm.heads['reward'](s).mean()[1:]
+        super().__init__()
+        # Define a reward function using the world model's reward head.
+        # We ignore the first timestep with [1:].
+        rewfn = lambda s: wm.heads['reward'](s).mean[1:]
         if config.critic_type == 'vfunction':
             critics = {'extr': agent_torch.VFunction(rewfn, config)}
         elif config.critic_type == 'qfunction':
@@ -26,17 +27,19 @@ class Greedy(tfutils.Module):
     def initial(self, batch_size):
         return self.ac.initial(batch_size)
 
-    def policy(self, latent, state):
-        return self.ac.policy(latent, state)
+    def policy(self, state, carry=None):
+        return self.ac.policy(state, carry)
 
-    def train(self, imagine, start, data):
-        return self.ac.train(imagine, start, data)
+    def train(self, imagine, start, context):
+        traj, metrics = self.ac.train_actor(imagine, start, context)
+        return traj, metrics
 
     def report(self, data):
         return {}
 
 class Random(tfutils.Module):
     def __init__(self, wm, act_space, config):
+        super().__init__()
         self.config = config
         self.act_space = act_space
 
@@ -69,6 +72,7 @@ class Explore(tfutils.Module):
     }
 
     def __init__(self, wm, act_space, config):
+        super().__init__()
         self.config = config
         self.rewards = {}
         critics = {}
