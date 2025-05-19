@@ -62,6 +62,7 @@ class Hierarchy(tfutils.Module):
 
     self.feat = nets.Input(['deter'])
     self.goal_shape = (self.config.rssm.deter,)
+    self.img_size = tuple(self.config.env.size) if self.config.env.gray else tuple(self.config.env.size) + (3,)
     self.enc = nets.MLP(
         config.skill_shape, dims='context', **config.goal_encoder)
     self.dec = nets.MLP(
@@ -74,6 +75,7 @@ class Hierarchy(tfutils.Module):
         'step': tf.zeros((batch_size,), tf.int64),
         'skill': tf.zeros((batch_size,) + self.config.skill_shape, tf.float32),
         'goal': tf.zeros((batch_size,) + self.goal_shape, tf.float32),
+        'frame_stack': tf.zeros((batch_size, self.config.frame_stack) + self.img_size)
     }
 
   def policy(self, latent, carry, imag=False):

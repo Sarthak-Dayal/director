@@ -60,6 +60,12 @@ defaults:
   wmkl: {impl: mult, scale: 0.1, target: 3.5, min: 1e-5, max: 1.0, vel: 0.1}
   wmkl_balance: 0.8
 
+  # ACRO Module
+  acro_shape: [64]
+  frame_stack: 3
+  acro_encoder: { mlp_keys: '$^', cnn_keys: 'frame_stack', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 64, cnn_kernels: [ 4, 4, 4, 4 ] }
+  acro_action_head: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [state_t, state_tk]}
+
   # Actor Critic
   actor: {layers: 4, units: 512, act: elu, norm: layer, minstd: 0.03, maxstd: 1.0, outscale: 0.1, unimix: 0.01, inputs: [deter, stoch]}
   critic: {layers: 4, units: 512, act: elu, norm: layer, dist: symlog, outscale: 0.1, inputs: [deter, stoch]}
