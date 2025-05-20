@@ -75,7 +75,7 @@ class Hierarchy(tfutils.Module):
         'step': tf.zeros((batch_size,), tf.int64),
         'skill': tf.zeros((batch_size,) + self.config.skill_shape, tf.float32),
         'goal': tf.zeros((batch_size,) + self.goal_shape, tf.float32),
-        'frame_stack': tf.zeros((batch_size, self.config.frame_stack) + self.img_size)
+        # 'frame_stack': tf.zeros((batch_size, self.config.frame_stack) + self.img_size)
     }
 
   def policy(self, latent, carry, imag=False):
