@@ -65,9 +65,10 @@ defaults:
   frame_stack: 3
   acro_encoder_backbone: { mlp_keys: '$^', cnn_keys: 'frame_stack', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 64, cnn_kernels: [ 4, 4, 4, 4 ] }
   acro_embedding_head: {act: elu, norm: layer}
-  acro_action_head: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [state_t, state_tk]}
+  acro_action_head: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: ['state_t', 'state_tk']}
+  acro_k_step: 5 # SAR TODO what should this be?
 
-  wm_to_acro_translation: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [deter, stoch]}
+  wm_to_acro_backbone: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [deter, stoch]}
 
   # Actor Critic
   actor: {layers: 4, units: 512, act: elu, norm: layer, minstd: 0.03, maxstd: 1.0, outscale: 0.1, unimix: 0.01, inputs: [deter, stoch]}
