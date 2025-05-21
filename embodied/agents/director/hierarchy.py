@@ -13,8 +13,9 @@ from . import tfutils
 
 class Hierarchy(tfutils.Module):
 
-  def __init__(self, wm, act_space, config):
+  def __init__(self, wm, acro_m, act_space, config):
     self.wm = wm
+    self.acro_m = acro_m
     self.config = config
     self.extr_reward = lambda traj: self.wm.heads['reward'](traj).mean()[1:]
     self.skill_space = embodied.Space(
@@ -61,7 +62,7 @@ class Hierarchy(tfutils.Module):
       self.prior = tfd.Independent(self.prior, len(shape))
 
     self.feat = nets.Input(['deter'])
-    self.goal_shape = (self.config.rssm.deter,)
+    self.goal_shape = (self.config.acro_embed_size,)
     self.img_size = tuple(self.config.env.size) if self.config.env.gray else tuple(self.config.env.size) + (3,)
     self.enc = nets.MLP(
         config.skill_shape, dims='context', **config.goal_encoder)
@@ -93,7 +94,8 @@ class Hierarchy(tfutils.Module):
         if self.config.manager_delta else new_goal)
     goal = sg(switch(carry['goal'], new_goal))
     delta = goal - self.feat(latent).astype(tf.float32)
-    dist = self.worker.actor(sg({**latent, 'goal': goal, 'delta': delta}))
+    worker_latent = {k : self.acro_m.wm_to_acro_backbone(latent[k]) for k in latent.keys() }
+    dist = self.worker.actor(sg({**worker_latent, 'goal': goal, 'delta': delta}))
     outs = {'action': dist}
     if 'image' in self.wm.heads['decoder'].shapes:
       outs['log_goal'] = self.wm.heads['decoder']({
@@ -151,6 +153,8 @@ class Hierarchy(tfutils.Module):
       traj = self.wm.imagine_carry(
           policy, start, self.config.imag_horizon,
           self.initial(len(start['is_first'])))
+      # SAR TODO FIXME: WARNING: this only works for this style of training, other training functions
+      # will need to be updated to use the new imag_carry function if we need to test them.
       traj['reward_extr'] = self.extr_reward(traj)
       traj['reward_expl'] = self.expl_reward(traj)
       traj['reward_goal'] = self.goal_reward(traj)

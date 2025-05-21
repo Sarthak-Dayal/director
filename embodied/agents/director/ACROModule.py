@@ -11,6 +11,25 @@ from . import nets
 from . import tfagent
 from . import tfutils
 
+# SAR TODO'S:
+
+# 1. Initialize the acro model wherever the world model is initialized
+#    Basically just follow the pattern of the world model, but with the 
+#    acro
+
+# 2. Add the acro model to the training loop (wm train to get wm_state 
+#    to update the data for acro training, then call acro training with 
+#    same data as usual for wm training)
+
+# 3. Add the acro model to the evaluation loop for the worker, so that 
+#    instead of encoding into the world model, we encode into the acro 
+#    model for the worker only. Also, manager needs to use the 
+#    translation layer to translate imagination into acro space
+
+# 4. Ensure that we use the metrics from the acro model for proper 
+#    logging/visualization and store checkpoints for the acro model
+
+# 5. Enjoy!
 
 class FrameStack:
     def __init__(self, k):

@@ -6,6 +6,8 @@ import tensorflow as tf
 from tensorflow.keras import mixed_precision as prec
 from tensorflow_probability import distributions as tfd
 
+from embodied.agents.director.ACROModule import ACROModule
+
 from . import behaviors
 from . import nets
 from . import tfagent
@@ -23,8 +25,11 @@ class Agent(tfagent.TFAgent):
     self.act_space = act_space['action']
     self.step = step
     self.wm = WorldModel(obs_space, config)
+    self.acro_m = ACROModule(act_space, config)
     self.task_behavior = getattr(behaviors, config.task_behavior)(
-        self.wm, self.act_space, self.config)
+        self.wm, self.acro_m, self.act_space, self.config)
+    # SAR TODO FIXME: WARNING: this will only work for the Hierarchy behavior because the 
+    # acro_m is not passed to the other behaviors. This is a temporary fix.
     if config.expl_behavior == 'None':
       self.expl_behavior = self.task_behavior
     else:
@@ -71,6 +76,8 @@ class Agent(tfagent.TFAgent):
       state = self.initial_train_state(data)
     data = self.preprocess(data)
     state, wm_outs, mets = self.wm.train(data, state)
+    data['wm_state'] = wm_outs['post'] # SAR TODO Check if this is correct
+    mets.update(self.acro_m.train(data))
     metrics.update(mets)
     context = {**data, **wm_outs['post']}
     start = tf.nest.map_structure(
@@ -88,6 +95,7 @@ class Agent(tfagent.TFAgent):
 
   @tf.function
   def report(self, data):
+    # SAR TODO: Guessing I need to do something with ACRO here, unsure exactly what
     self.config.tf.jit and print('Tracing report function.')
     data = self.preprocess(data)
     report = {}
@@ -137,6 +145,7 @@ class Agent(tfagent.TFAgent):
 class WorldModel(tfutils.Module):
 
   def __init__(self, obs_space, config):
+    import pdb; pdb.set_trace()
     shapes = {k: tuple(v.shape) for k, v in obs_space.items()}
     shapes = {k: v for k, v in shapes.items() if not k.startswith('log_')}
     self.config = config
@@ -150,6 +159,7 @@ class WorldModel(tfutils.Module):
     self.wmkl = tfutils.AutoAdapt((), **self.config.wmkl, inverse=False)
 
   def train(self, data, state=None):
+    import pdb; pdb.set_trace()
     with tf.GradientTape() as model_tape:
       model_loss, state, outputs, metrics = self.loss(
           data, state, training=True)
@@ -158,6 +168,7 @@ class WorldModel(tfutils.Module):
     return state, outputs, metrics
 
   def loss(self, data, state=None, training=False):
+    import pdb; pdb.set_trace()
     metrics = {}
     embed = self.encoder(data)
     post, prior = self.rssm.observe(
@@ -204,16 +215,18 @@ class WorldModel(tfutils.Module):
     last_state = {k: v[:, -1] for k, v in post.items()}
     return model_loss.mean(), last_state, out, metrics
 
-  def imagine(self, policy, start, horizon):
+  def imagine(self, policy, start, horizon, acro_m):
+    import pdb; pdb.set_trace()
     first_cont = (1.0 - start['is_terminal']).astype(tf.float32)
     keys = list(self.rssm.initial(1).keys())
     start = {k: v for k, v in start.items() if k in keys}
-    start['action'] = policy(start)
+    work_start = {k: acro_m.wm_to_acro_backbone(start[k]) for k in start.keys()}
+    start['action'] = policy(work_start)
     def step(prev, _):
       prev = prev.copy()
       action = prev.pop('action')
       state = self.rssm.img_step(prev, action)
-      action = policy(state)
+      action = policy(acro_m.wm_to_acro_backbone(state))
       return {**state, 'action': action}
     traj = tfutils.scan(
         step, tf.range(horizon), start, self.config.imag_unroll)
@@ -225,11 +238,14 @@ class WorldModel(tfutils.Module):
     return traj
 
   def imagine_carry(self, policy, start, horizon, carry):
+    import pdb; pdb.set_trace()
     first_cont = (1.0 - start['is_terminal']).astype(tf.float32)
     keys = list(self.rssm.initial(1).keys())
     start = {k: v for k, v in start.items() if k in keys}
     keys += list(carry.keys()) + ['action']
     states = [start]
+    # embedded acro_m into policy to translate to acro space and 
+    # then feed to worker policy
     outs, carry = policy(start, carry)
     action = outs['action']
     if hasattr(action, 'sample'):
@@ -255,6 +271,7 @@ class WorldModel(tfutils.Module):
     return traj
 
   def report(self, data):
+    import pdb; pdb.set_trace()
     report = {}
     report.update(self.loss(data)[-1])
     context, _ = self.rssm.observe(
