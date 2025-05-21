@@ -1,7 +1,6 @@
 import sys
-
+import collections
 import numpy as np
-
 import embodied
 import ruamel.yaml as yaml
 import tensorflow as tf
@@ -11,6 +10,18 @@ from . import behaviors
 from . import nets
 from . import tfagent
 from . import tfutils
+
+
+class FrameStack:
+    def __init__(self, k):
+        self.k = k
+        self.deque = collections.deque(maxlen=k)
+
+    def add_frame(self, frame):
+        self.deque.append(frame)
+
+    def get_frames(self):
+        return tf.stack(list(self.deque), axis=1)
 
 
 class ACROModule(tfutils.Module):
@@ -41,4 +52,53 @@ class ACROModule(tfutils.Module):
         return self.wm_to_acro_backbone(wm_state)
 
     def train(self, data):
-        pass
+        # data is time-major ([T, batch, ...])
+        images = data['image']
+        actions = data['action']
+        wm_states = data['wm_state'] # TODO input this in training data
+
+        # dimensions
+        T = tf.shape(images)[0]
+        batch = tf.shape(images)[1]
+        k = self.config.acro.k_step
+        K = self.config.frame_stack
+
+        fs_cur = FrameStack(K) # current frame stack
+        fs_fut = FrameStack(K) # future frame stack, for k-step prediction loss
+        metrics = {}
+
+        # prefill frame stacks
+        for t in range(K):
+            fs_cur.add_frame(images[t])
+            fs_fut.add_frame(images[t + k])
+
+        # slide along time
+        for i in range(int(K - 1), int(T - k)):
+            acro_state_cur = self.embed_acro(fs_cur.get_frames())
+            acro_state_fut = self.embed_acro(fs_fut.get_frames())
+
+            true_action = actions[i]
+            wm_state = wm_states[i]
+
+            # calculate losses
+            with tf.GradientTape() as translation_tape:
+                pred_wm = self.translate_wm(wm_state)
+                wm_loss = tf.reduce_mean(tf.square(pred_wm - acro_state_fut)) # MSE Loss
+
+            with tf.GradientTape() as action_tape:
+                combined = tf.concat([acro_state_cur, acro_state_fut], axis=-1) # K-step apart states
+                pred_action = self.acro_action_backbone(combined)
+                norm_true = tf.nn.l2_normalize(true_action, axis=-1)
+                action_loss = tf.reduce_mean(tf.square(pred_action - norm_true))
+
+            # make updates
+            metrics.update(self.opt(translation_tape, wm_loss, [self.wm_to_acro_backbone]))
+            metrics.update(self.opt(action_tape, action_loss, [self.acro_action_backbone,self.acro_embedding_head, self.acro_encoder_backbone]))
+
+            # update state
+            next_cur = i + 1
+            next_fut = i + k + 1
+            fs_cur.add_frame(images[next_cur])
+            fs_fut.add_frame(images[next_fut])
+
+        return metrics
