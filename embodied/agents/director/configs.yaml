@@ -67,8 +67,9 @@ defaults:
   acro_embedding_head: {act: elu, norm: layer}
   acro_action_head: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: ['state_t', 'state_tk']}
   acro_k_step: 5 # SAR TODO what should this be?
+  acro_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'} # SAR TODO what should this be?
 
-  wm_to_acro_backbone: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [deter, stoch]}
+  wm_to_acro_backbone: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1}
 
   # Actor Critic
   actor: {layers: 4, units: 512, act: elu, norm: layer, minstd: 0.03, maxstd: 1.0, outscale: 0.1, unimix: 0.01, inputs: [deter, stoch]}
@@ -107,7 +108,7 @@ defaults:
   skill_shape: [8, 8]
   manager_rews: {extr: 1.0, expl: 0.1, goal: 0.0}
   worker_rews: {extr: 0.0, expl: 0.0, goal: 1.0}
-  worker_inputs: [deter, stoch, goal]
+  worker_inputs: [acro, goal]
   worker_report_horizon: 64
   skill_proposal: manager
   goal_proposal: replay

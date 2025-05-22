@@ -6,9 +6,7 @@ import ruamel.yaml as yaml
 import tensorflow as tf
 from tensorflow_probability import distributions as tfd
 
-from . import behaviors
 from . import nets
-from . import tfagent
 from . import tfutils
 
 # SAR TODO'S:
@@ -40,7 +38,11 @@ class FrameStack:
         self.deque.append(frame)
 
     def get_frames(self):
-        return tf.stack(list(self.deque), axis=1)
+        frames = tf.stack(list(self.deque), axis=-1)
+        shape = tf.shape(frames)
+        B, H, W = shape[0], shape[1], shape[2]
+        C_stack = shape[3] * shape[4]
+        return tf.reshape(frames, [B, H, W, C_stack])
 
 
 class ACROModule(tfutils.Module):
@@ -54,15 +56,15 @@ class ACROModule(tfutils.Module):
         self.config = config
 
         # ACRO Model
-        self.acro_state_size = self.img_size = (self.config.frame_stack,) + tuple(self.config.env.size) if self.config.env.gray else tuple(self.config.env.size) + (3,)
-
+        self.acro_state_size = (*self.config.env.size, self.config.frame_stack) if self.config.env.gray else (*self.config.env.size, 3 * self.config.frame_stack)
         self.acro_encoder_backbone = nets.MultiEncoder({"frame_stack": self.acro_state_size}, **self.config.acro_encoder_backbone)
         self.acro_embedding_head = nets.Dense(units=self.config.acro_embed_size, **self.config.acro_embedding_head)
-
-        self.acro_action_head = nets.MLP(act_space.shape, **self.config.acro_action_head)
+        self.acro_action_head = nets.MLP(act_space['action'].shape, **self.config.acro_action_head)
 
         # Translation Layer
         self.wm_to_acro_backbone = nets.MLP(shape=(self.config.acro_embed_size,), **self.config.wm_to_acro_backbone)
+        
+        self.opt = tfutils.Optimizer('acro', **self.config.acro_opt)
 
     def embed_acro(self, frame_stack):
         hidden = self.acro_encoder_backbone({"frame_stack": frame_stack})
@@ -75,8 +77,11 @@ class ACROModule(tfutils.Module):
         # data is allegedly time-major ([T, batch, ...])
         images = data['image']
         actions = data['action']
-        wm_states = data['wm_state'] # SAR TODO input this in training data
+        flattened_stoch = tf.reshape(data['wm_state']['stoch'], [tf.shape(data['wm_state']['stoch'])[0], tf.shape(data['wm_state']['stoch'])[1], -1])  # K*D
 
+        # Now both are (T, B, dim), so we can concat on last axis
+        wm_states = tf.concat([flattened_stoch, data['wm_state']['deter']], axis=-1)
+        
         # dimensions
         T = tf.shape(images)[0]
         batch = tf.shape(images)[1]
@@ -94,29 +99,34 @@ class ACROModule(tfutils.Module):
 
         # slide along time
         for i in range(int(frame_k - 1), int(T - k)):
-            acro_state_cur = self.embed_acro(fs_cur.get_frames())
-            acro_state_fut = self.embed_acro(fs_fut.get_frames())
-
             true_action = actions[i]
             wm_state = wm_states[i]
 
             # calculate losses
             with tf.GradientTape() as translation_tape:
-                pred_wm = self.translate_wm(wm_state)
-                wm_loss = tf.reduce_mean(tf.square(pred_wm - acro_state_fut)) # MSE Loss
+                acro_state_cur = self.embed_acro(fs_cur.get_frames())
+                acro_state_fut = self.embed_acro(fs_fut.get_frames())
+                wm_dist = self.translate_wm(wm_state)
+                acro_state_fut = tf.cast(acro_state_fut, wm_dist.dtype) # half precision stuff
+                wm_loss = -tf.reduce_mean(wm_dist.log_prob(acro_state_fut))
 
             with tf.GradientTape() as action_tape:
-                pred_action = self.acro_action_head({'state_t': acro_state_cur, 'state_tk': acro_state_fut})
-                norm_true = tf.nn.l2_normalize(true_action, axis=-1)
-                action_loss = tf.reduce_mean(tf.square(pred_action - norm_true))
+                acro_state_cur = self.embed_acro(fs_cur.get_frames())
+                acro_state_fut = self.embed_acro(fs_fut.get_frames())
+                action_dist = self.acro_action_head({'state_t': acro_state_cur, 'state_tk': acro_state_fut})
+                action_loss = -tf.reduce_mean(action_dist.log_prob(true_action))
 
             # make updates
             metrics.update(self.opt(translation_tape, wm_loss, [self.wm_to_acro_backbone]))
-            metrics.update(self.opt(action_tape, action_loss, [self.acro_action_backbone,self.acro_embedding_head, self.acro_encoder_backbone]))
+            metrics.update(self.opt(action_tape, action_loss, [self.acro_action_head,self.acro_embedding_head, self.acro_encoder_backbone]))
 
             # update state
             next_cur = i + 1
             next_fut = i + k + 1
+            
+            if next_fut >= T:
+                break
+            
             fs_cur.add_frame(images[next_cur])
             fs_fut.add_frame(images[next_fut])
 

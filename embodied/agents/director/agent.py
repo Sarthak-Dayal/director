@@ -76,8 +76,7 @@ class Agent(tfagent.TFAgent):
       state = self.initial_train_state(data)
     data = self.preprocess(data)
     state, wm_outs, mets = self.wm.train(data, state)
-    data['wm_state'] = wm_outs['post'] # SAR TODO Check if this is correct
-    mets.update(self.acro_m.train(data))
+    mets.update(self.acro_m.train({**data, 'wm_state': wm_outs['post']}))
     metrics.update(mets)
     context = {**data, **wm_outs['post']}
     start = tf.nest.map_structure(
@@ -145,7 +144,6 @@ class Agent(tfagent.TFAgent):
 class WorldModel(tfutils.Module):
 
   def __init__(self, obs_space, config):
-    import pdb; pdb.set_trace()
     shapes = {k: tuple(v.shape) for k, v in obs_space.items()}
     shapes = {k: v for k, v in shapes.items() if not k.startswith('log_')}
     self.config = config
@@ -159,7 +157,6 @@ class WorldModel(tfutils.Module):
     self.wmkl = tfutils.AutoAdapt((), **self.config.wmkl, inverse=False)
 
   def train(self, data, state=None):
-    import pdb; pdb.set_trace()
     with tf.GradientTape() as model_tape:
       model_loss, state, outputs, metrics = self.loss(
           data, state, training=True)
@@ -168,7 +165,6 @@ class WorldModel(tfutils.Module):
     return state, outputs, metrics
 
   def loss(self, data, state=None, training=False):
-    import pdb; pdb.set_trace()
     metrics = {}
     embed = self.encoder(data)
     post, prior = self.rssm.observe(
@@ -220,7 +216,9 @@ class WorldModel(tfutils.Module):
     first_cont = (1.0 - start['is_terminal']).astype(tf.float32)
     keys = list(self.rssm.initial(1).keys())
     start = {k: v for k, v in start.items() if k in keys}
-    work_start = {k: acro_m.wm_to_acro_backbone(start[k]) for k in start.keys()}
+    ft = tf.reshape(start['stoch'], [tf.shape(start['stoch'])[0], -1])  
+    ft = tf.concat([ft, start['deter']], axis=-1)
+    work_start = {'acro': acro_m.wm_to_acro_backbone(ft).sample()}
     start['action'] = policy(work_start)
     def step(prev, _):
       prev = prev.copy()
@@ -238,7 +236,6 @@ class WorldModel(tfutils.Module):
     return traj
 
   def imagine_carry(self, policy, start, horizon, carry):
-    import pdb; pdb.set_trace()
     first_cont = (1.0 - start['is_terminal']).astype(tf.float32)
     keys = list(self.rssm.initial(1).keys())
     start = {k: v for k, v in start.items() if k in keys}
@@ -271,7 +268,6 @@ class WorldModel(tfutils.Module):
     return traj
 
   def report(self, data):
-    import pdb; pdb.set_trace()
     report = {}
     report.update(self.loss(data)[-1])
     context, _ = self.rssm.observe(

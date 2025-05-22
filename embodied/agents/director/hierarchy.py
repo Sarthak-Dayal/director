@@ -76,7 +76,7 @@ class Hierarchy(tfutils.Module):
         'step': tf.zeros((batch_size,), tf.int64),
         'skill': tf.zeros((batch_size,) + self.config.skill_shape, tf.float32),
         'goal': tf.zeros((batch_size,) + self.goal_shape, tf.float32),
-        # 'frame_stack': tf.zeros((batch_size, self.config.frame_stack) + self.img_size)
+        'acro': tf.zeros((batch_size, self.config.acro_embed_size), tf.float32),
     }
 
   def policy(self, latent, carry, imag=False):
@@ -93,15 +93,20 @@ class Hierarchy(tfutils.Module):
         self.feat(latent).astype(tf.float32) + new_goal
         if self.config.manager_delta else new_goal)
     goal = sg(switch(carry['goal'], new_goal))
-    delta = goal - self.feat(latent).astype(tf.float32)
-    worker_latent = {k : self.acro_m.wm_to_acro_backbone(latent[k]) for k in latent.keys() }
-    dist = self.worker.actor(sg({**worker_latent, 'goal': goal, 'delta': delta}))
+    # SAR TODO temporary disable to make things work, might want to re-enable deltas
+    # delta = goal - self.feat(latent).astype(tf.float32)
+    flattened_stoch = tf.reshape(latent['stoch'], [tf.shape(latent['stoch'])[0], -1])
+    worker_latent = tf.concat([flattened_stoch, latent['deter']], axis=-1)
+    worker_latent = {"acro": self.acro_m.wm_to_acro_backbone(worker_latent).sample()}
+    dist = self.worker.actor(sg({**worker_latent, 'goal': goal}))
     outs = {'action': dist}
-    if 'image' in self.wm.heads['decoder'].shapes:
-      outs['log_goal'] = self.wm.heads['decoder']({
-          'deter': goal, 'stoch': self.wm.rssm.get_stoch(goal),
-      })['image'].mode()
-    carry = {'step': carry['step'] + 1, 'skill': skill, 'goal': goal}
+    # SAR TODO FIXME: this is a hack to get the image decoder to work, this WILL make debugging 
+    # much harder, but we need to get the code working first.
+    # if 'image' in self.wm.heads['decoder'].shapes:
+      # outs['log_goal'] = self.wm.heads['decoder']({
+      #     'deter': goal, 'stoch': self.wm.rssm.get_stoch(goal),
+      # })['image'].mode()
+    carry = {'step': carry['step'] + 1, 'skill': skill, 'goal': goal, 'acro': worker_latent['acro']}
     return outs, carry
 
   def train(self, imagine, start, data):
@@ -158,7 +163,10 @@ class Hierarchy(tfutils.Module):
       traj['reward_extr'] = self.extr_reward(traj)
       traj['reward_expl'] = self.expl_reward(traj)
       traj['reward_goal'] = self.goal_reward(traj)
-      traj['delta'] = traj['goal'] - self.feat(traj).astype(tf.float32)
+      ft = tf.reshape(traj['stoch'], [tf.shape(traj['stoch'])[0], tf.shape(traj['stoch'])[1], -1])  
+      feat = tf.concat([ft, traj['deter']], axis=-1)
+      feat = self.acro_m.wm_to_acro_backbone(feat).sample()
+      traj['delta'] = traj['goal'] - feat.astype(tf.float32)
       wtraj = self.split_traj(traj)
       mtraj = self.abstract_traj(traj)
     mets = self.worker.update(wtraj, tape)
@@ -242,9 +250,16 @@ class Hierarchy(tfutils.Module):
         goal = feat[:, self.config.train_skill_duration:]
     else:
       goal = context = feat
+    
     with tf.GradientTape() as tape:
+      # SAR TODO clean this up
+      ft = tf.reshape(data['stoch'], [tf.shape(data['stoch'])[0], tf.shape(data['stoch'])[1], -1])  
+      ft = tf.concat([ft, data['deter']], axis=-1)
+      
+      goal = self.acro_m.wm_to_acro_backbone(ft).sample()
       enc = self.enc({'goal': goal, 'context': context})
       dec = self.dec({'skill': enc.sample(), 'context': context})
+      goal = tf.cast(goal, dec.dtype)
       rec = -dec.log_prob(tf.stop_gradient(goal))
       if self.config.goal_kl:
         kl = tfd.kl_divergence(enc, self.prior)
@@ -307,7 +322,9 @@ class Hierarchy(tfutils.Module):
     raise NotImplementedError(impl)
 
   def goal_reward(self, traj):
-    feat = self.feat(traj).astype(tf.float32)
+    ft = tf.reshape(traj['stoch'], [tf.shape(traj['stoch'])[0], tf.shape(traj['stoch'])[1], -1])  
+    feat = tf.concat([ft, traj['deter']], axis=-1)
+    feat = self.acro_m.wm_to_acro_backbone(feat).sample()
     goal = tf.stop_gradient(traj['goal'].astype(tf.float32))
     skill = tf.stop_gradient(traj['skill'].astype(tf.float32))
     context = tf.stop_gradient(
@@ -397,7 +414,9 @@ class Hierarchy(tfutils.Module):
       raise NotImplementedError(self.config.goal_reward)
 
   def elbo_reward(self, traj):
-    feat = self.feat(traj).astype(tf.float32)
+    ft = tf.reshape(traj['stoch'], [tf.shape(traj['stoch'])[0], tf.shape(traj['stoch'])[1], -1])  
+    ft = tf.concat([ft, traj['deter']], axis=-1)
+    feat = self.acro_m.wm_to_acro_backbone(ft).sample()
     context = tf.repeat(feat[0][None], 1 + self.config.imag_horizon, 0)
     enc = self.enc({'goal': feat, 'context': context})
     dec = self.dec({'skill': enc.sample(), 'context': context})
@@ -472,33 +491,36 @@ class Hierarchy(tfutils.Module):
     return metrics
 
   def report_worker(self, data, impl):
-    # Prepare initial state.
-    decoder = self.wm.heads['decoder']
-    states, _ = self.wm.rssm.observe(
-        self.wm.encoder(data)[:6], data['action'][:6], data['is_first'][:6])
-    start = {k: v[:, 4] for k, v in states.items()}
-    start['is_terminal'] = data['is_terminal'][:6, 4]
-    goal = self.propose_goal(start, impl)
-    # Worker rollout.
-    worker = lambda s: self.worker.actor({
-        **s, 'goal': goal, 'delta': goal - self.feat(s).astype(tf.float32),
-    }).sample()
-    traj = self.wm.imagine(
-        worker, start, self.config.worker_report_horizon)
-    # Decoder into images.
-    initial = decoder(start)
-    target = decoder({'deter': goal, 'stoch': self.wm.rssm.get_stoch(goal)})
-    rollout = decoder(traj)
-    # Stich together into videos.
-    videos = {}
-    for k in rollout.keys():
-      if k not in decoder.cnn_shapes:
-        continue
-      length = 1 + self.config.worker_report_horizon
-      rows = []
-      rows.append(tf.repeat(initial[k].mode()[:, None], length, 1))
-      if target is not None:
-        rows.append(tf.repeat(target[k].mode()[:, None], length, 1))
-      rows.append(rollout[k].mode().transpose((1, 0, 2, 3, 4)))
-      videos[k] = tfutils.video_grid(tf.concat(rows, 2))
-    return videos
+    # SAR TODO if its not obvious, we need to make sure that we restore this so we can get videos
+    return {}
+    # # Prepare initial state.
+    # decoder = self.wm.heads['decoder']
+    # states, _ = self.wm.rssm.observe(
+    #     self.wm.encoder(data)[:6], data['action'][:6], data['is_first'][:6])
+    # start = {k: v[:, 4] for k, v in states.items()}
+    # start['is_terminal'] = data['is_terminal'][:6, 4]
+    # goal = self.propose_goal(start, impl)
+    # # Worker rollout.
+    # worker = lambda s: self.worker.actor({
+    #     **s, 'goal': goal, 'delta': goal - self.feat(s).astype(tf.float32),
+    # }).sample()
+    # import pdb; pdb.set_trace()
+    # traj = self.wm.imagine(
+    #     worker, start, self.config.worker_report_horizon, self.acro_m)
+    # # Decoder into images.
+    # initial = decoder(start)
+    # target = decoder({'deter': goal, 'stoch': self.wm.rssm.get_stoch(goal)})
+    # rollout = decoder(traj)
+    # # Stich together into videos.
+    # videos = {}
+    # for k in rollout.keys():
+    #   if k not in decoder.cnn_shapes:
+    #     continue
+    #   length = 1 + self.config.worker_report_horizon
+    #   rows = []
+    #   rows.append(tf.repeat(initial[k].mode()[:, None], length, 1))
+    #   if target is not None:
+    #     rows.append(tf.repeat(target[k].mode()[:, None], length, 1))
+    #   rows.append(rollout[k].mode().transpose((1, 0, 2, 3, 4)))
+    #   videos[k] = tfutils.video_grid(tf.concat(rows, 2))
+    # return videos
