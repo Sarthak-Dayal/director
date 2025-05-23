@@ -29,7 +29,7 @@ class Agent(tfagent.TFAgent):
     self.task_behavior = getattr(behaviors, config.task_behavior)(
         self.wm, self.acro_m, self.act_space, self.config)
     # SAR TODO FIXME: WARNING: this will only work for the Hierarchy behavior because the 
-    # acro_m is not passed to the other behaviors. This is a temporary fix.
+    # acro_m is not a parameter in the other behaviors. This is a temporary fix.
     if config.expl_behavior == 'None':
       self.expl_behavior = self.task_behavior
     else:
@@ -94,7 +94,7 @@ class Agent(tfagent.TFAgent):
 
   @tf.function
   def report(self, data):
-    # SAR TODO: Guessing I need to do something with ACRO here, unsure exactly what
+    # SAR TODO: Guessing I should to do something with ACRO here, unsure exactly what
     self.config.tf.jit and print('Tracing report function.')
     data = self.preprocess(data)
     report = {}
@@ -212,7 +212,6 @@ class WorldModel(tfutils.Module):
     return model_loss.mean(), last_state, out, metrics
 
   def imagine(self, policy, start, horizon, acro_m):
-    import pdb; pdb.set_trace()
     first_cont = (1.0 - start['is_terminal']).astype(tf.float32)
     keys = list(self.rssm.initial(1).keys())
     start = {k: v for k, v in start.items() if k in keys}
@@ -224,7 +223,9 @@ class WorldModel(tfutils.Module):
       prev = prev.copy()
       action = prev.pop('action')
       state = self.rssm.img_step(prev, action)
-      action = policy(acro_m.wm_to_acro_backbone(state))
+      ft = tf.reshape(state['stoch'], [tf.shape(state['stoch'])[0], -1])  
+      ft = tf.concat([ft, state['deter']], axis=-1)      
+      action = policy({"acro": acro_m.wm_to_acro_backbone(ft).sample()})
       return {**state, 'action': action}
     traj = tfutils.scan(
         step, tf.range(horizon), start, self.config.imag_unroll)

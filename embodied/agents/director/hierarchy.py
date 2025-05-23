@@ -100,12 +100,11 @@ class Hierarchy(tfutils.Module):
     worker_latent = {"acro": self.acro_m.wm_to_acro_backbone(worker_latent).sample()}
     dist = self.worker.actor(sg({**worker_latent, 'goal': goal}))
     outs = {'action': dist}
-    # SAR TODO FIXME: this is a hack to get the image decoder to work, this WILL make debugging 
-    # much harder, but we need to get the code working first.
-    # if 'image' in self.wm.heads['decoder'].shapes:
-      # outs['log_goal'] = self.wm.heads['decoder']({
-      #     'deter': goal, 'stoch': self.wm.rssm.get_stoch(goal),
-      # })['image'].mode()
+    if 'image' in self.wm.heads['decoder'].shapes:
+      outs['log_goal'] = self.wm.heads['decoder']({
+          'deter': latent['deter'], 'stoch': self.wm.rssm.get_stoch(latent['deter']),
+      })['image'].mode()
+      
     carry = {'step': carry['step'] + 1, 'skill': skill, 'goal': goal, 'acro': worker_latent['acro']}
     return outs, carry
 
@@ -252,7 +251,6 @@ class Hierarchy(tfutils.Module):
       goal = context = feat
     
     with tf.GradientTape() as tape:
-      # SAR TODO clean this up
       ft = tf.reshape(data['stoch'], [tf.shape(data['stoch'])[0], tf.shape(data['stoch'])[1], -1])  
       ft = tf.concat([ft, data['deter']], axis=-1)
       
@@ -304,7 +302,10 @@ class Hierarchy(tfutils.Module):
     return metrics
 
   def propose_goal(self, start, impl):
-    feat = self.feat(start).astype(tf.float32)
+    ft = tf.reshape(start['stoch'], [tf.shape(start['stoch'])[0], -1])
+    ft = tf.concat([ft, start['deter']], axis=-1)
+    feat = self.acro_m.wm_to_acro_backbone(ft).sample()
+    feat = feat.astype(tf.float32)
     if impl == 'replay':
       target = tf.random.shuffle(feat).astype(tf.float32)
       skill = self.enc({'goal': target, 'context': feat}).sample()
@@ -491,36 +492,37 @@ class Hierarchy(tfutils.Module):
     return metrics
 
   def report_worker(self, data, impl):
-    # SAR TODO if its not obvious, we need to make sure that we restore this so we can get videos
-    return {}
-    # # Prepare initial state.
-    # decoder = self.wm.heads['decoder']
-    # states, _ = self.wm.rssm.observe(
-    #     self.wm.encoder(data)[:6], data['action'][:6], data['is_first'][:6])
-    # start = {k: v[:, 4] for k, v in states.items()}
-    # start['is_terminal'] = data['is_terminal'][:6, 4]
-    # goal = self.propose_goal(start, impl)
-    # # Worker rollout.
-    # worker = lambda s: self.worker.actor({
-    #     **s, 'goal': goal, 'delta': goal - self.feat(s).astype(tf.float32),
-    # }).sample()
-    # import pdb; pdb.set_trace()
-    # traj = self.wm.imagine(
-    #     worker, start, self.config.worker_report_horizon, self.acro_m)
-    # # Decoder into images.
-    # initial = decoder(start)
-    # target = decoder({'deter': goal, 'stoch': self.wm.rssm.get_stoch(goal)})
-    # rollout = decoder(traj)
-    # # Stich together into videos.
-    # videos = {}
-    # for k in rollout.keys():
-    #   if k not in decoder.cnn_shapes:
-    #     continue
-    #   length = 1 + self.config.worker_report_horizon
-    #   rows = []
-    #   rows.append(tf.repeat(initial[k].mode()[:, None], length, 1))
-    #   if target is not None:
-    #     rows.append(tf.repeat(target[k].mode()[:, None], length, 1))
-    #   rows.append(rollout[k].mode().transpose((1, 0, 2, 3, 4)))
-    #   videos[k] = tfutils.video_grid(tf.concat(rows, 2))
-    # return videos
+    # SAR TODO we need to make sure that we restore this so we can get the correct goal in videos. See below.
+    # Prepare initial state.
+    decoder = self.wm.heads['decoder']
+    states, _ = self.wm.rssm.observe(
+        self.wm.encoder(data)[:6], data['action'][:6], data['is_first'][:6])
+    start = {k: v[:, 4] for k, v in states.items()}
+    start['is_terminal'] = data['is_terminal'][:6, 4]
+    goal = self.propose_goal(start, impl)
+    # Worker rollout.
+    worker = lambda s: self.worker.actor({
+        **s, 'goal': goal
+    }).sample()
+    traj = self.wm.imagine(
+        worker, start, self.config.worker_report_horizon, self.acro_m)
+    # Decoder into images.
+    initial = decoder(start)
+    # SAR TODO: This is wrong but I don't know the correct way to fix it yet, goals come from a variety
+    # of places but them come in acro land, we need to somehow turn them into images. 
+    # maybe we should make a new decoder that takes in acro and outputs images?
+    target = decoder({'deter': start['deter'], 'stoch': self.wm.rssm.get_stoch(start['deter'])})
+    rollout = decoder(traj)
+    # Stich together into videos.
+    videos = {}
+    for k in rollout.keys():
+      if k not in decoder.cnn_shapes:
+        continue
+      length = 1 + self.config.worker_report_horizon
+      rows = []
+      rows.append(tf.repeat(initial[k].mode()[:, None], length, 1))
+      if target is not None:
+        rows.append(tf.repeat(target[k].mode()[:, None], length, 1))
+      rows.append(rollout[k].mode().transpose((1, 0, 2, 3, 4)))
+      videos[k] = tfutils.video_grid(tf.concat(rows, 2))
+    return videos
