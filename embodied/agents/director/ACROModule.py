@@ -1,5 +1,4 @@
 import sys
-import collections
 import numpy as np
 import embodied
 import ruamel.yaml as yaml
@@ -9,63 +8,38 @@ from tensorflow_probability import distributions as tfd
 from . import nets
 from . import tfutils
 
-# SAR TODO'S:
-
-# 1. Initialize the acro model wherever the world model is initialized
-#    Basically just follow the pattern of the world model, but with the 
-#    acro
-
-# 2. Add the acro model to the training loop (wm train to get wm_state 
-#    to update the data for acro training, then call acro training with 
-#    same data as usual for wm training)
-
-# 3. Add the acro model to the evaluation loop for the worker, so that 
-#    instead of encoding into the world model, we encode into the acro 
-#    model for the worker only. Also, manager needs to use the 
-#    translation layer to translate imagination into acro space
-
-# 4. Ensure that we use the metrics from the acro model for proper 
-#    logging/visualization and store checkpoints for the acro model
-
-# 5. Enjoy!
-
-class FrameStack:
-    def __init__(self, k):
-        self.k = k
-        self.deque = collections.deque(maxlen=k)
-
-    def add_frame(self, frame):
-        self.deque.append(frame)
-
-    def get_frames(self):
-        frames = tf.stack(list(self.deque), axis=-1)
-        shape = tf.shape(frames)
-        B, H, W = shape[0], shape[1], shape[2]
-        C_stack = shape[3] * shape[4]
-        return tf.reshape(frames, [B, H, W, C_stack])
-
-
 class ACROModule(tfutils.Module):
-
-    # ACRO Model
-    # Translation from World Model to ACRO space
-    # SAR TODO ACRO to skill VAE
-
     def __init__(self, act_space, config):
         super().__init__()
         self.config = config
 
-        # ACRO Model
-        self.acro_state_size = (*self.config.env.size, self.config.frame_stack) if self.config.env.gray else (*self.config.env.size, 3 * self.config.frame_stack)
-        self.acro_encoder_backbone = nets.MultiEncoder({"frame_stack": self.acro_state_size}, **self.config.acro_encoder_backbone)
-        self.acro_embedding_head = nets.Dense(units=self.config.acro_embed_size, **self.config.acro_embedding_head)
-        self.acro_action_head = nets.MLP(act_space['action'].shape, **self.config.acro_action_head)
+        # ACRO Model dimensions
+        size_H, size_W = self.config.env.size
+        channels = 1 if self.config.env.gray else 3
+        self.acro_state_size = (size_H, size_W, channels * self.config.frame_stack)
 
-        # Translation Layer
-        self.wm_to_acro_backbone = nets.MLP(shape=(self.config.acro_embed_size,), **self.config.wm_to_acro_backbone)
-        
+        # Encoder and heads
+        self.acro_encoder_backbone = nets.MultiEncoder(
+            {"frame_stack": self.acro_state_size},
+            **self.config.acro_encoder_backbone
+        )
+        self.acro_embedding_head = nets.Dense(
+            units=self.config.acro_embed_size,
+            **self.config.acro_embedding_head
+        )
+        self.acro_action_head = nets.MLP(
+            act_space['action'].shape,
+            **self.config.acro_action_head
+        )
+
+        # Translation layer
+        self.wm_to_acro_backbone = nets.MLP(
+            shape=(self.config.acro_embed_size,),
+            **self.config.wm_to_acro_backbone
+        )
         self.opt = tfutils.Optimizer('acro', **self.config.acro_opt)
 
+    @tf.function
     def embed_acro(self, frame_stack):
         hidden = self.acro_encoder_backbone({"frame_stack": frame_stack})
         return self.acro_embedding_head(hidden)
@@ -73,61 +47,97 @@ class ACROModule(tfutils.Module):
     def translate_wm(self, wm_state):
         return self.wm_to_acro_backbone(wm_state)
 
+    @tf.function
+    def _stack_frames(self, images, t):
+        frame_k = tf.constant(self.config.frame_stack, dtype=tf.int32)
+        start = t - frame_k + 1
+        window = images[start : t + 1]  # [k, B, H, W, C]
+        permuted = tf.transpose(window, perm=[1, 2, 3, 4, 0])  # [B, H, W, C, k]
+        shape = tf.shape(permuted)
+        B, H, W, C, K = shape[0], shape[1], shape[2], shape[3], shape[4]
+        return tf.reshape(permuted, [B, H, W, C * K])
+
+    @tf.function
     def train(self, data):
-        # data is allegedly time-major ([T, batch, ...])
-        images = data['image']
+        # Unpack
+        images = data['image']  # [T, B, H, W, C]
         actions = data['action']
-        flattened_stoch = tf.reshape(data['wm_state']['stoch'], [tf.shape(data['wm_state']['stoch'])[0], tf.shape(data['wm_state']['stoch'])[1], -1])  # K*D
+        stoch = data['wm_state']['stoch']
+        deter = data['wm_state']['deter']
 
-        # Now both are (T, B, dim), so we can concat on last axis
-        wm_states = tf.concat([flattened_stoch, data['wm_state']['deter']], axis=-1)
-        
-        # dimensions
+        # Prepare WM states
+        flattened_stoch = tf.reshape(
+            stoch,
+            [tf.shape(stoch)[0], tf.shape(stoch)[1], -1]
+        )
+        wm_states = tf.concat([flattened_stoch, deter], axis=-1)
+
+        # Loop bounds
         T = tf.shape(images)[0]
-        batch = tf.shape(images)[1]
-        k = self.config.acro_k_step
-        frame_k = self.config.frame_stack
+        k = tf.constant(self.config.acro_k_step, dtype=tf.int32)
+        frame_k = tf.constant(self.config.frame_stack, dtype=tf.int32)
 
-        fs_cur = FrameStack(frame_k) # current frame stack
-        fs_fut = FrameStack(frame_k) # future frame stack, for k-step prediction loss
-        metrics = {}
+        # Static dims for shape enforcement
+        size_H, size_W = self.config.env.size
+        channels = 1 if self.config.env.gray else 3
+        C_stack = channels * self.config.frame_stack
 
-        # prefill frame stacks
-        for t in range(frame_k):
-            fs_cur.add_frame(images[t])
-            fs_fut.add_frame(images[t + k])
+        # Calculate iteration count
+        start_i = frame_k - 1
+        end_i = T - k
+        N = end_i - start_i
 
-        # slide along time
-        for i in range(int(frame_k - 1), int(T - k)):
-            true_action = actions[i]
+        # TensorArrays for metrics
+        ta_wm = tf.TensorArray(tf.float32, size=N)
+        ta_action = tf.TensorArray(tf.float32, size=N)
+        idx = tf.constant(0, tf.int32)
+
+        # Loop in graph
+        for i in tf.range(start_i, end_i):
+            # Build frame stacks
+            cur = self._stack_frames(images, i)
+            cur = tf.ensure_shape(cur, [None, size_H, size_W, C_stack])
+            fut = self._stack_frames(images, i + k)
+            fut = tf.ensure_shape(fut, [None, size_H, size_W, C_stack])
+
             wm_state = wm_states[i]
 
-            # calculate losses
+            # Translation update
             with tf.GradientTape() as translation_tape:
-                acro_state_cur = self.embed_acro(fs_cur.get_frames())
-                acro_state_fut = self.embed_acro(fs_fut.get_frames())
+                acro_cur = self.embed_acro(cur)
+                acro_fut = self.embed_acro(fut)
                 wm_dist = self.translate_wm(wm_state)
-                acro_state_fut = tf.cast(acro_state_fut, wm_dist.dtype) # half precision stuff
-                wm_loss = -tf.reduce_mean(wm_dist.log_prob(acro_state_fut))
+                acro_fut = tf.cast(acro_fut, wm_dist.dtype)
+                wm_loss = -tf.reduce_mean(wm_dist.log_prob(acro_fut))
+            self.opt(translation_tape, wm_loss, [self.wm_to_acro_backbone])
 
+            # Action update
             with tf.GradientTape() as action_tape:
-                acro_state_cur = self.embed_acro(fs_cur.get_frames())
-                acro_state_fut = self.embed_acro(fs_fut.get_frames())
-                action_dist = self.acro_action_head({'state_t': acro_state_cur, 'state_tk': acro_state_fut})
-                action_loss = -tf.reduce_mean(action_dist.log_prob(true_action))
+                acro_cur2 = self.embed_acro(cur)
+                acro_fut2 = self.embed_acro(fut)
+                action_dist = self.acro_action_head({
+                    'state_t': acro_cur2,
+                    'state_tk': acro_fut2
+                })
+                action_loss = -tf.reduce_mean(
+                    action_dist.log_prob(actions[i])
+                )
+            self.opt(
+                action_tape,
+                action_loss,
+                [
+                    self.acro_action_head,
+                    self.acro_embedding_head,
+                    self.acro_encoder_backbone
+                ]
+            )
 
-            # make updates
-            metrics.update(self.opt(translation_tape, wm_loss, [self.wm_to_acro_backbone]))
-            metrics.update(self.opt(action_tape, action_loss, [self.acro_action_head,self.acro_embedding_head, self.acro_encoder_backbone]))
+            # Record losses
+            ta_wm = ta_wm.write(idx, wm_loss)
+            ta_action = ta_action.write(idx, action_loss)
+            idx += 1
 
-            # update state
-            next_cur = i + 1
-            next_fut = i + k + 1
-            
-            if next_fut >= T:
-                break
-            
-            fs_cur.add_frame(images[next_cur])
-            fs_fut.add_frame(images[next_fut])
-
-        return metrics
+        # Stack and return
+        wm_losses = ta_wm.stack()
+        action_losses = ta_action.stack()
+        return {'wm_loss': wm_losses, 'action_loss': action_losses}
