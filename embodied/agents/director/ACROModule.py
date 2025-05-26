@@ -37,7 +37,8 @@ class ACROModule(tfutils.Module):
             shape=(self.config.acro_embed_size,),
             **self.config.wm_to_acro_backbone
         )
-        self.opt = tfutils.Optimizer('acro', **self.config.acro_opt)
+        self.opt_wm = tfutils.Optimizer('acro_wm', **self.config.acro_opt)
+        self.opt_act = tfutils.Optimizer('acro_action', **self.config.acro_opt)
 
     @tf.function
     def embed_acro(self, frame_stack):
@@ -108,8 +109,9 @@ class ACROModule(tfutils.Module):
                 acro_fut = self.embed_acro(fut)
                 wm_dist = self.translate_wm(wm_state)
                 acro_fut = tf.cast(acro_fut, wm_dist.dtype)
-                wm_loss = -tf.reduce_mean(wm_dist.log_prob(acro_fut))
-            self.opt(translation_tape, wm_loss, [self.wm_to_acro_backbone])
+                wm_loss = -tf.reduce_mean(wm_dist.log_prob(tf.cast(acro_cur, wm_dist.dtype)))
+            
+            self.opt_wm(translation_tape, wm_loss, [self.wm_to_acro_backbone])
 
             # Action update
             with tf.GradientTape() as action_tape:
@@ -122,7 +124,8 @@ class ACROModule(tfutils.Module):
                 action_loss = -tf.reduce_mean(
                     action_dist.log_prob(actions[i])
                 )
-            self.opt(
+                
+            self.opt_act(
                 action_tape,
                 action_loss,
                 [
@@ -140,4 +143,4 @@ class ACROModule(tfutils.Module):
         # Stack and return
         wm_losses = ta_wm.stack()
         action_losses = ta_action.stack()
-        return {'wm_loss': wm_losses, 'action_loss': action_losses}
+        return {'acro_wm_loss': wm_losses, 'acro_action_loss': action_losses}
