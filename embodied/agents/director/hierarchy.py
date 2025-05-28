@@ -63,11 +63,14 @@ class Hierarchy(tfutils.Module):
 
     self.feat = nets.Input(['deter'])
     self.goal_shape = (self.config.acro_embed_size,)
+    self.wm_shape = (self.config.rssm.deter,)
     self.img_size = tuple(self.config.env.size) if self.config.env.gray else tuple(self.config.env.size) + (3,)
     self.enc = nets.MLP(
         config.skill_shape, dims='context', **config.goal_encoder)
     self.dec = nets.MLP(
-        self.goal_shape, dims='context', **self.config.goal_decoder)
+        self.wm_shape, dims='context', **self.config.goal_decoder)
+    self.m_goal = nets.MLP(
+        self.goal_shape, dims='context', **self.config.manager_goal)
     self.kl = tfutils.AutoAdapt((), **self.config.encdec_kl)
     self.opt = tfutils.Optimizer('goal', **config.encdec_opt)
 
@@ -88,7 +91,7 @@ class Hierarchy(tfutils.Module):
         tf.einsum('i,i...->i...', 1 - update.astype(x.dtype), x) +
         tf.einsum('i,i...->i...', update.astype(x.dtype), y))
     skill = sg(switch(carry['skill'], self.manager.actor(sg(latent)).sample()))
-    new_goal = self.dec({'skill': skill, 'context': self.feat(latent)}).mode()
+    new_goal = self.m_goal({'skill': skill, 'context': self.feat(latent)}).mode()
     new_goal = (
         self.feat(latent).astype(tf.float32) + new_goal
         if self.config.manager_delta else new_goal)
@@ -249,15 +252,9 @@ class Hierarchy(tfutils.Module):
         goal = feat[:, self.config.train_skill_duration:]
     else:
       goal = context = feat
-    
     with tf.GradientTape() as tape:
-      ft = tf.reshape(data['stoch'], [tf.shape(data['stoch'])[0], tf.shape(data['stoch'])[1], -1])  
-      ft = tf.concat([ft, data['deter']], axis=-1)
-      
-      goal = self.acro_m.wm_to_acro_backbone(ft).sample()
       enc = self.enc({'goal': goal, 'context': context})
       dec = self.dec({'skill': enc.sample(), 'context': context})
-      goal = tf.cast(goal, dec.dtype)
       rec = -dec.log_prob(tf.stop_gradient(goal))
       if self.config.goal_kl:
         kl = tfd.kl_divergence(enc, self.prior)
@@ -271,7 +268,6 @@ class Hierarchy(tfutils.Module):
     metrics['goalrec_mean'] = rec.mean()
     metrics['goalrec_std'] = rec.std()
     return metrics
-
   def train_vae_imag(self, traj):
     metrics = {}
     feat = self.feat(traj).astype(tf.float32)
@@ -307,19 +303,23 @@ class Hierarchy(tfutils.Module):
     feat = self.acro_m.wm_to_acro_backbone(ft).sample()
     feat = feat.astype(tf.float32)
     if impl == 'replay':
+      feat = self.feat(start).astype(tf.float32)
       target = tf.random.shuffle(feat).astype(tf.float32)
       skill = self.enc({'goal': target, 'context': feat}).sample()
-      return self.dec({'skill': skill, 'context': feat}).mode()
+      deter = self.dec({'skill': skill, 'context': feat}).mode()
+      stoch = self.wm.rssm.get_stoch(deter)
+      stoch = tf.reshape(stoch, [tf.shape(stoch)[0], -1])
+      return self.acro_m.wm_to_acro_backbone(tf.concat([stoch, deter.astype(tf.float16)], axis=-1)).sample()
     if impl == 'replay_direct':
       return tf.random.shuffle(feat).astype(tf.float32)
     if impl == 'manager':
       skill = self.manager.actor(start).sample()
-      goal = self.dec({'skill': skill, 'context': feat}).mode()
+      goal = self.m_goal({'skill': skill, 'context': feat}).mode()
       goal = feat + goal if self.config.manager_delta else goal
       return goal
     if impl == 'prior':
       skill = self.prior.sample(len(start['is_terminal']))
-      return self.dec({'skill': skill, 'context': feat}).mode()
+      return self.m_goal({'skill': skill, 'context': feat}).mode()
     raise NotImplementedError(impl)
 
   def goal_reward(self, traj):
@@ -415,9 +415,7 @@ class Hierarchy(tfutils.Module):
       raise NotImplementedError(self.config.goal_reward)
 
   def elbo_reward(self, traj):
-    ft = tf.reshape(traj['stoch'], [tf.shape(traj['stoch'])[0], tf.shape(traj['stoch'])[1], -1])  
-    ft = tf.concat([ft, traj['deter']], axis=-1)
-    feat = self.acro_m.wm_to_acro_backbone(ft).sample()
+    feat = self.feat(traj).astype(tf.float32)
     context = tf.repeat(feat[0][None], 1 + self.config.imag_horizon, 0)
     enc = self.enc({'goal': feat, 'context': context})
     dec = self.dec({'skill': enc.sample(), 'context': context})

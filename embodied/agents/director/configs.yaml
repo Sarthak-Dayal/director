@@ -115,6 +115,7 @@ defaults:
   goal_reward: cosine_max
   goal_encoder: {layers: 4, units: 512, act: elu, norm: layer, dist: onehot, outscale: 0.1, unimix: 0.0, inputs: [goal]}
   goal_decoder: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [skill]}
+  manager_goal: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [skill]}
   worker_goals: [manager]
   jointly: new
   vae_imag: False
@@ -224,4 +225,4 @@ debug:
   .*\.layers: 2
   .*\.units: 64
   .*\.wd: 0.0
-  tf: {platform: multi_gpu, jit: True}
+  tf: {platform: gpu, jit: True}
