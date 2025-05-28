@@ -6,6 +6,8 @@ import tensorflow as tf
 from tensorflow.keras import mixed_precision as prec
 from tensorflow_probability import distributions as tfd
 
+from embodied.agents.director.ACROModule import ACROModule
+
 from . import behaviors
 from . import nets
 from . import tfagent
@@ -23,8 +25,11 @@ class Agent(tfagent.TFAgent):
     self.act_space = act_space['action']
     self.step = step
     self.wm = WorldModel(obs_space, config)
+    self.acro_m = ACROModule(act_space, config)
     self.task_behavior = getattr(behaviors, config.task_behavior)(
         self.wm, self.act_space, self.config)
+    # SAR TODO FIXME: WARNING: this will only work for the Hierarchy behavior because the 
+    # acro_m is not a parameter in the other behaviors. This is a temporary fix.
     if config.expl_behavior == 'None':
       self.expl_behavior = self.task_behavior
     else:
@@ -71,6 +76,7 @@ class Agent(tfagent.TFAgent):
       state = self.initial_train_state(data)
     data = self.preprocess(data)
     state, wm_outs, mets = self.wm.train(data, state)
+    mets.update(self.acro_m.train({**data, 'wm_state': wm_outs['post']}))
     metrics.update(mets)
     context = {**data, **wm_outs['post']}
     start = tf.nest.map_structure(

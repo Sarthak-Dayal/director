@@ -3,3 +3,6 @@ __pycache__/
 *.egg-info
 dist
 MUJOCO_LOG.TXT
+.vscode/
+wandb/
+deps

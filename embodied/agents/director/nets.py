@@ -104,7 +104,7 @@ class RSSM(tfutils.Module):
         (prev_state, prev_action))
     prev_state = tf.nest.map_structure(
         lambda x, y: x + tf.einsum('b...,b->b...', self._cast(y), is_first),
-        prev_state, self.initial(len(is_first)))
+        prev_state, self.initial(is_first.shape[0]))
     prior = self.img_step(prev_state, prev_action)
     x = tf.concat([prior['deter'], embed], -1)
     x = self.get('obs_out', Dense, **self._kw)(x)

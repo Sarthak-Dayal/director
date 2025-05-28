@@ -1,6 +1,8 @@
 import pathlib
 import sys
-import warnings
+import warnings\
+
+import wandb
 
 warnings.filterwarnings('ignore', '.*box bound precision lowered.*')
 warnings.filterwarnings('ignore', '.*using stateful random seeds*')
@@ -39,6 +41,8 @@ def main(argv=None):
   logdir = embodied.Path(config.logdir)
   step = embodied.Counter()
   cleanup = []
+  
+  wandb.init(project="Director ACRO", sync_tensorboard=True)
 
   if config.run == 'acting':
     actordir = logdir / f'actor{parsed.actor_id}'
