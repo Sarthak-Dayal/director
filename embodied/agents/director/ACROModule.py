@@ -37,7 +37,7 @@ class ACROModule(tfutils.Module):
             shape=(self.config.acro_embed_size,),
             **self.config.wm_to_acro_backbone
         )
-        self.opt_wm = tfutils.Optimizer('acro_wm', **self.config.acro_opt)
+        self.opt_wm = tfutils.Optimizer('acro_wm', **self.config.acro_wm_opt)
         self.opt_act = tfutils.Optimizer('acro_action', **self.config.acro_opt)
 
     @tf.function
