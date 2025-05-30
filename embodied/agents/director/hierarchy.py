@@ -69,10 +69,14 @@ class Hierarchy(tfutils.Module):
         config.skill_shape, dims='context', **config.goal_encoder)
     self.dec = nets.MLP(
         self.wm_shape, dims='context', **self.config.goal_decoder)
-    self.m_goal = nets.MLP(
-        self.goal_shape, dims='context', **self.config.manager_goal)
+    self.acro_enc = nets.MLP(
+        config.skill_shape, dims='context', **self.config.acro_encoder)
+    self.acro_dec = nets.MLP(
+        self.goal_shape, dims='context', **self.config.acro_decoder)
     self.kl = tfutils.AutoAdapt((), **self.config.encdec_kl)
     self.opt = tfutils.Optimizer('goal', **config.encdec_opt)
+    self.acro_kl = tfutils.AutoAdapt((), **self.config.acro_kl)
+    self.acro_vae_opt = tfutils.Optimizer('acro_vae', **self.config.acro_vae_opt)
 
   def initial(self, batch_size):
     return {
@@ -91,7 +95,7 @@ class Hierarchy(tfutils.Module):
         tf.einsum('i,i...->i...', 1 - update.astype(x.dtype), x) +
         tf.einsum('i,i...->i...', update.astype(x.dtype), y))
     skill = sg(switch(carry['skill'], self.manager.actor(sg(latent)).sample()))
-    new_goal = self.m_goal({'skill': skill, 'context': self.feat(latent)}).mode()
+    new_goal = self.acro_dec({'skill': skill, 'context': self.feat(latent)}).mode()
     new_goal = (
         self.feat(latent).astype(tf.float32) + new_goal
         if self.config.manager_delta else new_goal)
@@ -100,7 +104,7 @@ class Hierarchy(tfutils.Module):
     # delta = goal - self.feat(latent).astype(tf.float32)
     flattened_stoch = tf.reshape(latent['stoch'], [tf.shape(latent['stoch'])[0], -1])
     worker_latent = tf.concat([flattened_stoch, latent['deter']], axis=-1)
-    worker_latent = {"acro": self.acro_m.wm_to_acro_backbone(worker_latent).sample()}
+    worker_latent = {"acro": self.acro_m.wm_to_acro_backbone(worker_latent).mode()}
     dist = self.worker.actor(sg({**worker_latent, 'goal': goal}))
     outs = {'action': dist}
     if 'image' in self.wm.heads['decoder'].shapes:
@@ -167,7 +171,7 @@ class Hierarchy(tfutils.Module):
       traj['reward_goal'] = self.goal_reward(traj)
       ft = tf.reshape(traj['stoch'], [tf.shape(traj['stoch'])[0], tf.shape(traj['stoch'])[1], -1])  
       feat = tf.concat([ft, traj['deter']], axis=-1)
-      feat = self.acro_m.wm_to_acro_backbone(feat).sample()
+      feat = self.acro_m.wm_to_acro_backbone(feat).mode()
       traj['delta'] = traj['goal'] - feat.astype(tf.float32)
       wtraj = self.split_traj(traj)
       mtraj = self.abstract_traj(traj)
@@ -242,6 +246,9 @@ class Hierarchy(tfutils.Module):
   def train_vae_replay(self, data):
     metrics = {}
     feat = self.feat(data).astype(tf.float32)
+    ft = tf.reshape(data['stoch'], [tf.shape(data['stoch'])[0], tf.shape(data['stoch'])[1], -1])  
+    ft = tf.concat([ft, data['deter']], axis=-1)
+    acro_feat = self.acro_m.wm_to_acro_backbone(ft).mode()
     if 'context' in self.config.goal_decoder.inputs:
       if self.config.vae_span:
         context = feat[:, 0]
@@ -264,6 +271,23 @@ class Hierarchy(tfutils.Module):
       else:
         kl = 0.0
       loss = (rec + kl).mean()
+    
+    with tf.GradientTape() as acro_tape:
+      acro_enc = self.acro_enc({'goal': acro_feat, 'context': acro_feat})
+      acro_dec = self.acro_dec({'skill': acro_enc.sample(), 'context': acro_feat})
+      rec_acro = -acro_dec.log_prob(tf.stop_gradient(acro_feat))
+      if self.config.acro_kl:
+        kl_acro = tfd.kl_divergence(acro_enc, self.prior)
+        kl_acro, mets = self.acro_kl(kl_acro)
+        metrics.update({f'acrokl_{k}': v for k, v in mets.items()})
+        assert rec_acro.shape == kl_acro.shape, (rec_acro.shape, kl_acro.shape)
+      else:
+        kl_acro = 0.0
+      loss_acro = (rec_acro + kl_acro).mean()
+
+    metrics.update(self.acro_vae_opt(acro_tape, loss_acro, [self.acro_enc, self.acro_dec]))
+    metrics['acrorec_mean'] = rec_acro.mean()
+    metrics['acrorec_std'] = rec_acro.std()
     metrics.update(self.opt(tape, loss, [self.enc, self.dec]))
     metrics['goalrec_mean'] = rec.mean()
     metrics['goalrec_std'] = rec.std()
@@ -300,7 +324,7 @@ class Hierarchy(tfutils.Module):
   def propose_goal(self, start, impl):
     ft = tf.reshape(start['stoch'], [tf.shape(start['stoch'])[0], -1])
     ft = tf.concat([ft, start['deter']], axis=-1)
-    feat = self.acro_m.wm_to_acro_backbone(ft).sample()
+    feat = self.acro_m.wm_to_acro_backbone(ft).mode()
     feat = feat.astype(tf.float32)
     if impl == 'replay':
       feat = self.feat(start).astype(tf.float32)
@@ -309,23 +333,23 @@ class Hierarchy(tfutils.Module):
       deter = self.dec({'skill': skill, 'context': feat}).mode()
       stoch = self.wm.rssm.get_stoch(deter)
       stoch = tf.reshape(stoch, [tf.shape(stoch)[0], -1])
-      return self.acro_m.wm_to_acro_backbone(tf.concat([stoch, deter.astype(tf.float16)], axis=-1)).sample()
+      return self.acro_m.wm_to_acro_backbone(tf.concat([stoch, deter.astype(tf.float16)], axis=-1)).mode()
     if impl == 'replay_direct':
       return tf.random.shuffle(feat).astype(tf.float32)
     if impl == 'manager':
       skill = self.manager.actor(start).sample()
-      goal = self.m_goal({'skill': skill, 'context': feat}).mode()
+      goal = self.acro_dec({'skill': skill, 'context': feat}).mode()
       goal = feat + goal if self.config.manager_delta else goal
       return goal
     if impl == 'prior':
       skill = self.prior.sample(len(start['is_terminal']))
-      return self.m_goal({'skill': skill, 'context': feat}).mode()
+      return self.acro_dec({'skill': skill, 'context': feat}).mode()
     raise NotImplementedError(impl)
 
   def goal_reward(self, traj):
     ft = tf.reshape(traj['stoch'], [tf.shape(traj['stoch'])[0], tf.shape(traj['stoch'])[1], -1])  
     feat = tf.concat([ft, traj['deter']], axis=-1)
-    feat = self.acro_m.wm_to_acro_backbone(feat).sample()
+    feat = self.acro_m.wm_to_acro_backbone(feat).mode()
     goal = tf.stop_gradient(traj['goal'].astype(tf.float32))
     skill = tf.stop_gradient(traj['skill'].astype(tf.float32))
     context = tf.stop_gradient(

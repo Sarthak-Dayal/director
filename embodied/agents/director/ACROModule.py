@@ -106,9 +106,7 @@ class ACROModule(tfutils.Module):
             # Translation update
             with tf.GradientTape() as translation_tape:
                 acro_cur = self.embed_acro(cur)
-                acro_fut = self.embed_acro(fut)
                 wm_dist = self.translate_wm(wm_state)
-                acro_fut = tf.cast(acro_fut, wm_dist.dtype)
                 wm_loss = -tf.reduce_mean(wm_dist.log_prob(tf.cast(acro_cur, wm_dist.dtype)))
             
             self.opt_wm(translation_tape, wm_loss, [self.wm_to_acro_backbone])
