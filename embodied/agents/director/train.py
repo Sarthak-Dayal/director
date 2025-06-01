@@ -24,6 +24,7 @@ import embodied
 def main(argv=None):
   from . import agent as agnt
   from . import train_with_viz
+  from . import TSNE_ACRO
 
   parsed, other = embodied.Flags(
       configs=['defaults'], actor_id=0, actors=0,
@@ -117,6 +118,15 @@ def main(argv=None):
     elif config.run == 'acting':
       replay = make_replay('episodes', args.train_fill)
       embodied.run.acting(agent, env, replay, logger, actordir, args)
+    elif config.run == "tsne_acro":
+      if config.eval_dir:
+        assert not config.train.eval_fill
+        eval_replay = make_replay(config.eval_dir, config.replay_size // 10)
+      else:
+        assert config.train.eval_fill
+        eval_replay = make_replay('eval_episodes', config.replay_size // 10)
+      replay = make_replay('episodes', config.replay_size)
+      TSNE_ACRO.tsne_acro(agent, replay, eval_replay, logger)
     else:
       raise NotImplementedError(config.run)
   finally:

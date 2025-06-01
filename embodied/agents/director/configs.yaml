@@ -65,7 +65,7 @@ defaults:
   frame_stack: 3
   acro_encoder_backbone: { mlp_keys: '$^', cnn_keys: 'frame_stack', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 192, cnn_kernels: [ 4, 4, 4, 4 ] }
   acro_embedding_head: {act: elu, norm: layer}
-  acro_action_head: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: ['state_t', 'state_tk']}
+  acro_action_head: {layers: 3, units: 256, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: ['state_t', 'state_tk']}
   acro_k_step: 5
   acro_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
 
