@@ -43,7 +43,7 @@ def main(argv=None):
   step = embodied.Counter()
   cleanup = []
   
-  wandb.init(project="Director ACRO", sync_tensorboard=True)
+  wandb.init(project="Director ACRO", sync_tensorboard=True, config=dict(config), dir=str(logdir / "wandb"))
 
   if config.run == 'acting':
     actordir = logdir / f'actor{parsed.actor_id}'
