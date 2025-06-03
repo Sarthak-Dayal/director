@@ -31,6 +31,11 @@ class ACROModule(tfutils.Module):
             act_space['action'].shape,
             **self.config.acro_action_head
         )
+        
+        self.decoder_backbone = nets.MultiDecoder(
+            self.image_size,
+            **self.config.acro_decoder_backbone
+        )
 
         # Translation layer
         # self.wm_to_acro_backbone = nets.MLP(
@@ -39,6 +44,7 @@ class ACROModule(tfutils.Module):
         # )
         # self.opt_wm = tfutils.Optimizer('acro_wm', **self.config.acro_opt)
         self.opt_act = tfutils.Optimizer('acro_action', **self.config.acro_opt)
+        self.opt_decoder = tfutils.Optimizer('acro_decoder', **self.config.acro_opt)
 
     @tf.function
     def embed_acro(self, frame_stack):
@@ -91,6 +97,7 @@ class ACROModule(tfutils.Module):
         # TensorArrays for metrics
         # ta_wm = tf.TensorArray(tf.float32, size=N)
         ta_action = tf.TensorArray(tf.float32, size=N)
+        ta_decoder = tf.TensorArray(tf.float32, size=N)
         idx = tf.constant(0, tf.int32)
 
         # Loop in graph
@@ -134,13 +141,34 @@ class ACROModule(tfutils.Module):
                     self.acro_encoder_backbone
                 ]
             )
+            
+            with tf.GradientTape() as decoder_tape:
+                # Reconstruct the future frame
+                acro_cur2 = tf.ensure_shape(acro_cur2, [None, self.config.acro_embed_size])
+                reconstructed = self.decoder_backbone({"acro": acro_cur2})
+                reconstructed = tf.ensure_shape(
+                    reconstructed, [None, size_H, size_W, C_stack]
+                )
+                
+                # Calculate reconstruction loss
+                reconstruction_loss = -tf.reduce_mean(
+                    reconstructed.log_prob(images[i])
+                )
+            
+            self.opt_decoder(
+                decoder_tape,
+                reconstruction_loss,
+                [self.decoder_backbone]
+            )
 
             # Record losses
             # ta_wm = ta_wm.write(idx, wm_loss)
             ta_action = ta_action.write(idx, action_loss)
+            ta_decoder = ta_decoder.write(idx, reconstruction_loss)
             idx += 1
 
         # Stack and return
         # wm_losses = ta_wm.stack()
         action_losses = ta_action.stack()
-        return {'acro_action_loss': action_losses}
+        decoder_losses = ta_decoder.stack()
+        return {'acro_action_loss': action_losses, "acro_decoder_loss": decoder_losses}
