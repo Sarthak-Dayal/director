@@ -9,9 +9,12 @@ from . import nets
 from . import tfutils
 
 class ACROModule(tfutils.Module):
-    def __init__(self, act_space, config):
+    def __init__(self, act_space, obs_space, config):
         super().__init__()
         self.config = config
+        
+        shapes = {k: tuple(v.shape) for k, v in obs_space.items()}
+        shapes = {k: v for k, v in shapes.items() if k.startswith('image')}
 
         # ACRO Model dimensions
         size_H, size_W = self.config.env.size
@@ -33,7 +36,7 @@ class ACROModule(tfutils.Module):
         )
         
         self.decoder_backbone = nets.MultiDecoder(
-            self.image_size,
+            shapes,
             **self.config.acro_decoder_backbone
         )
 
@@ -146,13 +149,10 @@ class ACROModule(tfutils.Module):
                 # Reconstruct the future frame
                 acro_cur2 = tf.ensure_shape(acro_cur2, [None, self.config.acro_embed_size])
                 reconstructed = self.decoder_backbone({"acro": acro_cur2})
-                reconstructed = tf.ensure_shape(
-                    reconstructed, [None, size_H, size_W, C_stack]
-                )
                 
                 # Calculate reconstruction loss
                 reconstruction_loss = -tf.reduce_mean(
-                    reconstructed.log_prob(images[i])
+                    reconstructed["image"].log_prob(tf.cast(images[i], reconstructed['image'].dtype))
                 )
             
             self.opt_decoder(
