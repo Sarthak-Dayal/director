@@ -25,7 +25,7 @@ class Agent(tfagent.TFAgent):
     self.act_space = act_space['action']
     self.step = step
     self.wm = WorldModel(obs_space, config)
-    self.acro_m = ACROModule(act_space, config)
+    self.acro_m = ACROModule(act_space, obs_space, config)
     self.task_behavior = getattr(behaviors, config.task_behavior)(
         self.wm, self.act_space, self.config)
     # SAR TODO FIXME: WARNING: this will only work for the Hierarchy behavior because the 
