@@ -57,6 +57,79 @@ class ACROModule(tfutils.Module):
     # def translate_wm(self, wm_state):
     #     return self.wm_to_acro_backbone(wm_state)
 
+    # Images: [T, H, W, C], terminal: [T,], actions: [T, A]
+    def extract_batch_from_traj(self, images, is_terminal, actions):
+        assert len(images.shape) == 4, "Images should be of shape [T, H, W, C]"
+        assert len(is_terminal.shape) == 1, "is_terminal should be of shape [T,]"
+        assert len(actions.shape) == 2, "Actions should be of shape [T, A]"
+        assert images.shape[0] == is_terminal.shape[0] == actions.shape[0], "All inputs must have the same time dimension T"
+
+        frame_k = tf.constant(self.config.frame_stack, dtype=tf.int32)
+
+        # 1) Stack frames: [T-k+1, k, H, W, C]
+        stacked_frames = tf.signal.frame(
+            images,
+            frame_length=frame_k,
+            frame_step=1,
+            axis=0
+        )
+
+        term_windows = tf.signal.frame(
+            is_terminal,
+            frame_length=frame_k,
+            frame_step=1,
+            axis=0
+        )
+
+        term_masks = tf.cast(tf.math.cumprod(~tf.cast(term_windows, tf.int32), axis=1, reverse=True), tf.bool)
+
+        masked_frames = stacked_frames * tf.cast(term_masks, stacked_frames.dtype)[..., None, None, None]
+
+        masked_frames = tf.transpose(masked_frames, perm=[0, 2, 3, 1, 4])
+        shape = tf.shape(masked_frames)
+        t_, h, w, k, c = shape[0], shape[1], shape[2], shape[3], shape[4]
+        stacked_frames = tf.reshape(masked_frames, [t_, h, w, k * c])
+
+        state_t = []
+        state_tk = []
+        acts = []
+
+        k = tf.constant(self.config.acro_k_step, dtype=tf.int32)
+        for t in range(t_ - k + 1):
+            if tf.reduce_any(tf.cast(term_windows[t], tf.bool)):
+                continue
+            # Stack frames for t and t + k
+            cur = stacked_frames[t]
+            cur = tf.ensure_shape(cur, [h, w, c * frame_k])
+
+            fut = stacked_frames[t + k]
+            fut = tf.ensure_shape(fut, [h, w, c * frame_k])
+
+            state_t.append(cur)
+            state_tk.append(fut)
+            acts.append(actions[t + k + frame_k - 1])
+
+        return tf.stack(state_t), tf.stack(state_tk), tf.stack(acts)
+
+    def get_acro_dataset(self, images, is_terminal, actions):
+        batch_t, batch_tk, batch_actions = [], [], []
+        for i in range(images.shape[1]):
+            # Extract batch for each trajectory
+            batch_images = images[:, i, ...]
+            batch_is_terminal = is_terminal[:, i, ...]
+            batch_action = actions[:, i, ...]
+
+            states_t, states_tk, actions_t = self.extract_batch_from_traj(batch_images, batch_is_terminal, batch_action)
+            batch_t.append(states_t)
+            batch_tk.append(states_tk)
+            batch_actions.append(actions_t)
+
+        # Stack all batches
+        batch_t = tf.concat(batch_t, axis=0)  # [B, T, H, W, C * k]
+        batch_tk = tf.concat(batch_tk, axis=0)  # [B, T, H, W, C * k]
+        batch_actions = tf.concat(batch_actions, axis=0)  # [B, T, A]
+        return batch_t, batch_tk, batch_actions
+
     @tf.function
     def _stack_frames(self, images, is_terminal, t):
         frame_k = tf.constant(self.config.frame_stack, dtype=tf.int32)
@@ -136,13 +209,15 @@ class ACROModule(tfutils.Module):
         ta_decoder = tf.TensorArray(tf.float32, size=1)
         idx = tf.constant(0, tf.int32)
 
-        
+        breakpoint()
         # Action update
         with tf.GradientTape() as action_tape:
-            states_t, states_tk, actions_t = self.get_training_data(images, is_terminal, actions)
+            states_t, states_tk, actions_t = self.get_acro_dataset(images, is_terminal, actions)
+            embed_t = self.embed_acro(states_t)
+            embed_tk = self.embed_acro(states_tk)
             action_dist = self.acro_action_head({
-                'state_t': states_t,
-                'state_tk': states_tk
+                'state_t': embed_t,
+                'state_tk': embed_tk
             })
             action_loss = -tf.reduce_mean(
                 action_dist.log_prob(actions_t)
@@ -158,28 +233,28 @@ class ACROModule(tfutils.Module):
             ]
         )
         
-        with tf.GradientTape() as decoder_tape:
-            # Reconstruct the future frame
-            T, B, H, W, C = tf.shape(images)
-            images = tf.reshape(images, [T * B, H, W, C])  # [T * B, H, W, C]
-
-            reconstructed = self.decoder_backbone({"acro": self.embed_acro(images)})
-            
-            # Calculate reconstruction loss
-            reconstruction_loss = -tf.reduce_mean(
-                reconstructed["image"].log_prob(tf.cast(images, reconstructed['image'].dtype))
-            )
+        # with tf.GradientTape() as decoder_tape:
+        #     # Reconstruct the future frame
+        #     T, B, H, W, C = tf.shape(images)
+        #     images = tf.reshape(images, [T * B, H, W, C])  # [T * B, H, W, C]
+        #
+        #     reconstructed = self.decoder_backbone({"acro": self.embed_acro(images)})
+        #
+        #     # Calculate reconstruction loss
+        #     reconstruction_loss = -tf.reduce_mean(
+        #         reconstructed["image"].log_prob(tf.cast(images, reconstructed['image'].dtype))
+        #     )
         
-        self.opt_decoder(
-            decoder_tape,
-            reconstruction_loss,
-            [self.decoder_backbone]
-        )
+        # self.opt_decoder(
+        #     decoder_tape,
+        #     reconstruction_loss,
+        #     [self.decoder_backbone]
+        # )
 
         # Record losses
         # ta_wm = ta_wm.write(idx, wm_loss)
         ta_action = ta_action.write(idx, action_loss)
-        ta_decoder = ta_decoder.write(idx, reconstruction_loss)
+        # ta_decoder = ta_decoder.write(idx, reconstruction_loss)
         idx += 1
 
         # Stack and return
