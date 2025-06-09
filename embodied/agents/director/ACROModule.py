@@ -3,6 +3,7 @@ import numpy as np
 import embodied
 import ruamel.yaml as yaml
 import tensorflow as tf
+import random
 from tensorflow_probability import distributions as tfd
 
 from . import nets
@@ -164,7 +165,6 @@ class ACROModule(tfutils.Module):
         # Action update
         with tf.GradientTape() as action_tape:
             states_t, states_tk, actions_t = self.get_acro_dataset(images, is_terminal, actions)
-            MAX_B = data['image'].shape[0] * data['image'].shape[1]  # T * B
             num_valid_windows = data['image'].shape[0] - self.config.frame_stack + 1
             num_valid_states_per_batch = num_valid_windows - self.config.acro_k_step
             states_t_shape = data['image'].shape[1] * num_valid_states_per_batch
@@ -197,14 +197,14 @@ class ACROModule(tfutils.Module):
         
         with tf.GradientTape() as decoder_tape:
             # Reconstruct the future frame
-            T, B, H, W, C = tf.shape(images)
+            T, B, H, W, C = images.shape
             images = tf.reshape(images, [T * B, H, W, C])  # [T * B, H, W, C]
         
-            reconstructed = self.decoder_backbone({"acro": self.embed_acro(images)})
+            reconstructed = self.decoder_backbone({"acro": self.embed_acro(states_t)})
         
             # Calculate reconstruction loss
             reconstruction_loss = -tf.reduce_mean(
-                reconstructed["image"].log_prob(tf.cast(images, reconstructed['image'].dtype))
+                reconstructed["image"].log_prob(tf.cast(images[self.config.frame_stack - 1: self.config.frame_stack + states_t_shape - 1], reconstructed['image'].dtype))
             )
         
         self.opt_decoder(
@@ -216,11 +216,44 @@ class ACROModule(tfutils.Module):
         # Record losses
         # ta_wm = ta_wm.write(idx, wm_loss)
         ta_action = ta_action.write(idx, action_loss)
-        # ta_decoder = ta_decoder.write(idx, reconstruction_loss)
+        ta_decoder = ta_decoder.write(idx, reconstruction_loss)
         idx += 1
 
         # Stack and return
         # wm_losses = ta_wm.stack()
         action_losses = ta_action.stack()
         decoder_losses = ta_decoder.stack()
-        return {'acro_action_loss': action_losses, 'acro_decoder_loss': decoder_losses}
+
+        metrics = {'acro_action_loss': action_losses, 'acro_decoder_loss': decoder_losses}
+
+        return metrics
+
+
+    def report(self, data):
+        images = data['image']  # [T, B, H, W, C]
+        actions = data['action']
+        is_terminal = data['is_terminal']  # [T, B, 1]
+
+        states_t, states_tk, actions_t = self.get_acro_dataset(images, is_terminal, actions)
+        num_valid_windows = data['image'].shape[0] - self.config.frame_stack + 1
+        num_valid_states_per_batch = num_valid_windows - self.config.acro_k_step
+        states_t_shape = data['image'].shape[1] * num_valid_states_per_batch
+
+        states_t = tf.ensure_shape(states_t, [states_t_shape, self.acro_state_size[0], self.acro_state_size[1],
+                                              self.acro_state_size[2]])
+
+        T, B, H, W, C = images.shape
+        images = tf.reshape(images, [T * B, H, W, C])  # [T * B, H, W, C]
+
+        reconstructed = self.decoder_backbone({"acro": self.embed_acro(states_t)})
+
+        random_img_idx = random.randint(0, states_t_shape - 1)
+
+        img = images[self.config.frame_stack - 1 + random_img_idx]
+        img = tf.expand_dims(img, 0)
+
+        recon = reconstructed['image'].mean()[random_img_idx]
+        recon = tf.expand_dims(recon, 0)
+
+        metrics = {f'acro_recon_image': tf.concat([tf.cast(img, recon.dtype), recon], 1)}
+        return metrics

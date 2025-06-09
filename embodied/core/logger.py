@@ -243,12 +243,15 @@ def _encode_gif(frames, fps):
   from subprocess import Popen, PIPE
   h, w, c = frames[0].shape
   pxfmt = {1: 'gray', 3: 'rgb24'}[c]
-  cmd = ' '.join([
-      'ffmpeg -y -f rawvideo -vcodec rawvideo',
-      f'-r {fps:.02f} -s {w}x{h} -pix_fmt {pxfmt} -i - -filter_complex',
-      '[0:v]split[x][z];[z]palettegen[y];[x]fifo[x];[x][y]paletteuse',
-      f'-r {fps:.02f} -f gif -'])
-  proc = Popen(cmd.split(' '), stdin=PIPE, stdout=PIPE, stderr=PIPE)
+  import os
+  FFMPEG = os.environ.get("IMAGEIO_FFMPEG_EXE", "ffmpeg")
+  cmd = [
+    FFMPEG, '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
+    '-r', f'{fps:.02f}', '-s', f'{w}x{h}', '-pix_fmt', pxfmt, '-i', '-',
+    '-filter_complex', '[0:v]split[x][z];[z]palettegen[y];[x][y]paletteuse',
+    '-r', f'{fps:.02f}', '-f', 'gif', '-'
+  ]
+  proc = Popen(cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
   for image in frames:
     proc.stdin.write(image.tobytes())
   out, err = proc.communicate()

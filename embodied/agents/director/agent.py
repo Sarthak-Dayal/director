@@ -100,6 +100,7 @@ class Agent(tfagent.TFAgent):
     report.update(self.wm.report(data))
     mets = self.task_behavior.report(data)
     report.update({f'task_{k}': v for k, v in mets.items()})
+    report.update({f'acro_{k}': v for k, v in self.acro_m.report(data).items()})
     if self.expl_behavior is not self.task_behavior:
       mets = self.expl_behavior.report(data)
       report.update({f'expl_{k}': v for k, v in mets.items()})

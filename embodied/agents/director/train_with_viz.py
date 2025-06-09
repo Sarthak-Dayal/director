@@ -7,6 +7,8 @@ import numpy as np
 import tensorflow as tf
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
+
+from embodied.agents.director import behaviors
 from embodied.replay import DiskStore
 
 
@@ -111,8 +113,16 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args, run_tsne
   driver.on_step(train_step)
 
   checkpoint = embodied.Checkpoint(logdir / 'checkpoint.pkl')
+  checkpoint_acro = embodied.Checkpoint(logdir / 'checkpoint_acro.pkl')
+
   checkpoint.step = step
-  checkpoint.agent = agent
+  # checkpoint.agent = agent
+  checkpoint.wm = agent.agent.wm
+  # checkpoint.acro_m = agent.agent.acro_m
+  checkpoint.task_behavior = agent.agent.acro_m
+
+  checkpoint_acro.acro_m = agent.agent.acro_m
+
   checkpoint.train_replay = train_replay
   checkpoint.eval_replay = eval_replay
   checkpoint.load_or_save()
@@ -214,4 +224,5 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args, run_tsne
       logger.write()
       driver(policy, steps=args.eval_every)
       checkpoint.save()
+      checkpoint_acro.save()
 
