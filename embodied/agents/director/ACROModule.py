@@ -194,13 +194,14 @@ class ACROModule(tfutils.Module):
                 self.acro_encoder_backbone
             ]
         )
-        
+
+        embed_t = self.embed_acro(states_t)
         with tf.GradientTape() as decoder_tape:
             # Reconstruct the future frame
             T, B, H, W, C = images.shape
             images = tf.reshape(images, [T * B, H, W, C])  # [T * B, H, W, C]
         
-            reconstructed = self.decoder_backbone({"acro": self.embed_acro(states_t)})
+            reconstructed = self.decoder_backbone({"acro": embed_t})
         
             # Calculate reconstruction loss
             reconstruction_loss = -tf.reduce_mean(

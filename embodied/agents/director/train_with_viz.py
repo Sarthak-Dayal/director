@@ -118,8 +118,8 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args, run_tsne
   checkpoint.step = step
   # checkpoint.agent = agent
   checkpoint.wm = agent.agent.wm
-  # checkpoint.acro_m = agent.agent.acro_m
-  checkpoint.task_behavior = agent.agent.acro_m
+  checkpoint.task_behavior = agent.agent.task_behavior
+  checkpoint.expl_behavior = agent.agent.expl_behavior
 
   checkpoint_acro.acro_m = agent.agent.acro_m
 

@@ -78,14 +78,15 @@ class Agent(tfagent.TFAgent):
     state, wm_outs, mets = self.wm.train(data, state)
     mets.update(self.acro_m.train({**data, 'wm_state': wm_outs['post']}))
     metrics.update(mets)
-    context = {**data, **wm_outs['post']}
-    start = tf.nest.map_structure(
-        lambda x: x.reshape([-1] + list(x.shape[2:])), context)
-    _, mets = self.task_behavior.train(self.wm.imagine, start, context)
-    metrics.update(mets)
-    if self.config.expl_behavior != 'None':
-      _, mets = self.expl_behavior.train(self.wm.imagine, start, context)
-      metrics.update({'expl_' + key: value for key, value in mets.items()})
+    if not self.config.freeze_director:
+      context = {**data, **wm_outs['post']}
+      start = tf.nest.map_structure(
+          lambda x: x.reshape([-1] + list(x.shape[2:])), context)
+      _, mets = self.task_behavior.train(self.wm.imagine, start, context)
+      metrics.update(mets)
+      if self.config.expl_behavior != 'None':
+        _, mets = self.expl_behavior.train(self.wm.imagine, start, context)
+        metrics.update({'expl_' + key: value for key, value in mets.items()})
     outs = {}
     if 'key' in data:
       criteria = {**data, **wm_outs}
@@ -161,7 +162,8 @@ class WorldModel(tfutils.Module):
       model_loss, state, outputs, metrics = self.loss(
           data, state, training=True)
     modules = [self.encoder, self.rssm, *self.heads.values()]
-    metrics.update(self.model_opt(model_tape, model_loss, modules))
+    if not self.config.freeze_director:
+      metrics.update(self.model_opt(model_tape, model_loss, modules))
     return state, outputs, metrics
 
   def loss(self, data, state=None, training=False):
