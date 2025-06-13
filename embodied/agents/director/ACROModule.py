@@ -1,4 +1,17 @@
 import sys
+import unittest
+import pathlib
+
+directory = pathlib.Path(__file__)
+try:
+    import google3  # noqa
+except ImportError:
+    directory = directory.resolve()
+directory = directory.parent
+sys.path.append(str(directory.parent))
+sys.path.append(str(directory.parent.parent.parent))
+__package__ = directory.name
+
 import numpy as np
 import embodied
 import ruamel.yaml as yaml
@@ -95,15 +108,17 @@ class ACROModule(tfutils.Module):
         state_t = tf.TensorArray(stacked_frames.dtype, size=0, dynamic_size=True)
         state_tk = tf.TensorArray(stacked_frames.dtype, size=0, dynamic_size=True)
         acts = tf.TensorArray(actions.dtype, size=0, dynamic_size=True)
+        mask = tf.TensorArray(tf.bool, size=0, dynamic_size=True)
 
         k = tf.constant(self.config.acro_k_step, dtype=tf.int32)
         for t in tf.range(t_ - k):
             if tf.reduce_any(tf.cast(is_terminal[t + frame_k - 1 : t + frame_k + k - 1], tf.bool)):
                 # If no valid frames were found, write a zero frame
                 # Removes a warning about conditionally empty TensorArrays and also does padding.
-                state_t = state_t.write(0, tf.zeros_like(stacked_frames[0], dtype=stacked_frames.dtype))
-                state_tk = state_tk.write(0, tf.zeros_like(stacked_frames[0], dtype=stacked_frames.dtype))
-                acts = acts.write(0, tf.zeros_like(actions[0], dtype=acts.dtype))
+                state_t = state_t.write(t, tf.zeros_like(stacked_frames[0], dtype=stacked_frames.dtype))
+                state_tk = state_tk.write(t, tf.zeros_like(stacked_frames[0], dtype=stacked_frames.dtype))
+                acts = acts.write(t, tf.zeros_like(actions[0], dtype=acts.dtype))
+                mask = mask.write(t, tf.constant(False, dtype=tf.bool))
                 continue
             
             # Stack frames for t and t + k
@@ -118,27 +133,30 @@ class ACROModule(tfutils.Module):
             state_t = state_t.write(t, cur)
             state_tk = state_tk.write(t, fut)
             acts = acts.write(t, act)
+            mask = mask.write(t, tf.constant(True, dtype=tf.bool))
 
-        return state_t.stack(), state_tk.stack(), acts.stack()
+        return state_t.stack(), state_tk.stack(), acts.stack(), mask.stack()
     
     def get_acro_dataset(self, images, is_terminal, actions):
-        batch_t, batch_tk, batch_actions = tf.TensorArray(images.dtype, size=0, dynamic_size=True), tf.TensorArray(images.dtype, size=0, dynamic_size=True), tf.TensorArray(actions.dtype, size=0, dynamic_size=True)
+        batch_t, batch_tk, batch_actions, batch_mask = tf.TensorArray(images.dtype, size=0, dynamic_size=True), tf.TensorArray(images.dtype, size=0, dynamic_size=True), tf.TensorArray(actions.dtype, size=0, dynamic_size=True), tf.TensorArray(tf.bool, size=0, dynamic_size=True)
         for i in range(images.shape[1]):
             # Extract batch for each trajectory
             batch_images = images[:, i, ...]
             batch_is_terminal = is_terminal[:, i, ...]
             batch_action = actions[:, i, ...]
 
-            states_t, states_tk, actions_t = self.extract_batch_from_traj(batch_images, batch_is_terminal, batch_action)
+            states_t, states_tk, actions_t, mask_t = self.extract_batch_from_traj(batch_images, batch_is_terminal, batch_action)
             batch_t = batch_t.write(i, states_t)
             batch_tk = batch_tk.write(i, states_tk)
             batch_actions = batch_actions.write(i, actions_t)
+            batch_mask = batch_mask.write(i, mask_t)
 
 
         # Stack all batches
         batch_t_stacked = batch_t.stack()
         batch_tk_stacked = batch_tk.stack()
         action_t_stacked = batch_actions.stack()
+        mask_t_stacked = batch_mask.stack()
         
         shape_batch = tf.shape(batch_t_stacked)
         shape_action = tf.shape(action_t_stacked)
@@ -147,8 +165,9 @@ class ACROModule(tfutils.Module):
         batch_t_reshaped = tf.reshape(batch_t_stacked, new_shape)
         batch_tk_reshaped = tf.reshape(batch_tk_stacked, new_shape)
         action_t_reshaped = tf.reshape(action_t_stacked, tf.concat([[shape_batch[0] * shape_batch[1]], shape_action[2:]], axis=0))
+        mask_t_reshaped = tf.reshape(mask_t_stacked, tf.concat([[shape_batch[0] * shape_batch[1]], mask_t_stacked.shape[2:]], axis=0))
         
-        return batch_t_reshaped, batch_tk_reshaped, action_t_reshaped
+        return batch_t_reshaped, batch_tk_reshaped, action_t_reshaped, mask_t_reshaped
 
     def train(self, data):
         images = data['image']  # [T, B, H, W, C]
@@ -164,7 +183,7 @@ class ACROModule(tfutils.Module):
         
         # Action update
         with tf.GradientTape() as action_tape:
-            states_t, states_tk, actions_t = self.get_acro_dataset(images, is_terminal, actions)
+            states_t, states_tk, actions_t, mask_t = self.get_acro_dataset(images, is_terminal, actions)
             num_valid_windows = data['image'].shape[0] - self.config.frame_stack + 1
             num_valid_states_per_batch = num_valid_windows - self.config.acro_k_step
             states_t_shape = data['image'].shape[1] * num_valid_states_per_batch
@@ -182,7 +201,7 @@ class ACROModule(tfutils.Module):
             })
             
             action_loss = -tf.reduce_mean(
-                action_dist.log_prob(actions_t)
+                action_dist.log_prob(actions_t) * tf.cast(mask_t, action_dist.dtype)
             )
             
         self.opt_act(
@@ -235,7 +254,7 @@ class ACROModule(tfutils.Module):
         actions = data['action']
         is_terminal = data['is_terminal']  # [T, B, 1]
 
-        states_t, states_tk, actions_t = self.get_acro_dataset(images, is_terminal, actions)
+        states_t, _, _, _ = self.get_acro_dataset(images, is_terminal, actions)
         num_valid_windows = data['image'].shape[0] - self.config.frame_stack + 1
         num_valid_states_per_batch = num_valid_windows - self.config.acro_k_step
         states_t_shape = data['image'].shape[1] * num_valid_states_per_batch
@@ -258,3 +277,97 @@ class ACROModule(tfutils.Module):
 
         metrics = {f'acro_recon_image': tf.concat([tf.cast(img, recon.dtype), recon], 1)}
         return metrics
+
+class ACROModuleTest(unittest.TestCase):
+
+    def test_dataset_gen(self):
+        from . import agent as agnt
+
+        def gen_images_actions(T, B):
+            # 1) Create 1-D indices [0,1,2,…,T*B-1]
+            idx = tf.range(T * B, dtype=tf.float32)
+
+            # 2) Build `images` of shape [T*B,H,W,C] where each slice = its index
+            images = tf.reshape(
+                tf.transpose(
+                    tf.reshape(idx, [B, T]), perm=[1, 0]
+                ), [T, B, 1, 1, 1]
+            )
+            images = tf.broadcast_to(images, [T, B, 64, 64, 3])
+
+            actions = tf.reshape(
+                tf.transpose(
+                    tf.reshape(idx, [B, T]), perm=[1, 0]
+                ), [T, B, 1]
+            )
+
+            return images, actions
+
+        def gen_terminals_zeros(T, B):
+            # Generate a tensor of shape [T, B] filled with zeros
+            return tf.zeros((T, B), dtype=tf.bool)
+
+        def gen_terminals_last(T, B):
+            # all False for first T-1 steps, all True at the last step
+            zeros = tf.zeros((T - 1, B), dtype=tf.bool)
+            ones = tf.concat([tf.zeros((1, B - 1), dtype=tf.bool), tf.ones((1, 1), dtype=tf.bool)], axis=1)
+            return tf.concat([zeros, ones], axis=0)
+
+        def gen_terminals_random(T, B):
+            # Generate a tensor of shape [T, B] with random boolean values
+            return tf.cast(tf.random.uniform((T, B), maxval=2, dtype=tf.int32), tf.bool)
+
+        def mini_test(T, B, frame_stack, k_step, terminal_gen=gen_terminals_last):
+            print("-" * 50)
+            print(f"Testing with T={T}, B={B}, frame_stack={frame_stack}, k_step={k_step}")
+            print("-" * 50)
+
+            config = embodied.Config(agnt.Agent.configs['defaults'])
+            config = config.update({"frame_stack": frame_stack, "acro_k_step": k_step})
+
+            acro_module = ACROModule(
+                act_space={'action': embodied.Space(np.uint8)},
+                obs_space={'image': embodied.Space(np.uint8, (64, 64, 3))},
+                config=config
+            )
+
+            images, actions = gen_images_actions(T, B)
+            is_terminal = terminal_gen(T, B)
+
+            # print("Images: ", images[:, :, 0, 0, 0])
+            # print("Actions: ", actions[:, :, 0])
+            # print("Is Terminal: ", is_terminal)
+
+            batch_t, batch_tk, action_t, mask_t = acro_module.get_acro_dataset(images, is_terminal, actions)
+
+            print("Batch T:", batch_t[:, 0, 0, -1])
+            print("Batch Tk:", batch_tk[:, 0, 0, -1])
+            print("Action T:", action_t[:, 0])
+
+            # Convert to NumPy
+            batch_last = batch_t[:, 0, 0, -1].numpy()
+            action_vals = action_t[:, 0].numpy()
+            batch_frame = batch_t[:, 0, 0, :].numpy()
+            tk_offset = (batch_tk[:, 0, 0, :] - config.acro_k_step).numpy()
+            mask = mask_t.numpy().reshape(-1)
+
+            # Filter only valid entries where mask is True
+            batch_last_valid = batch_last[mask]
+            action_valid = action_vals[mask]
+            batch_frame_valid = batch_frame[mask]
+            tk_offset_valid = tk_offset[mask]
+
+            # Assertions on filtered data
+            self.assertListEqual(batch_last_valid.tolist(), action_valid.tolist())
+            self.assertListEqual(batch_frame_valid.tolist(), tk_offset_valid.tolist())
+
+            # Check that we have enough data
+
+        mini_test(11, 8, 1, 1)
+        mini_test(11, 8, 3, 1, gen_terminals_zeros)
+        mini_test(11, 8, 3, 5)
+        mini_test(11, 8, 5, 3, gen_terminals_zeros)
+        mini_test(11, 8, 1, 1, gen_terminals_random)
+
+if __name__ == '__main__':
+    unittest.main()

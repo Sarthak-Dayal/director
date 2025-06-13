@@ -126,6 +126,7 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args, run_tsne
   checkpoint.train_replay = train_replay
   checkpoint.eval_replay = eval_replay
   checkpoint.load_or_save()
+  checkpoint_acro.load_or_save()
 
   print("reached past checkpoint.load_or_save()")
   

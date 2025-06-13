@@ -248,7 +248,7 @@ class Hierarchy(tfutils.Module):
       else:
         kl = 0.0
       loss = (rec + kl).mean()
-    metrics.update(self.opt(tape, loss, [self.enc, self.dec]))
+    metrics.update(self.opt(tape, loss, [] if self.config.freeze_director else [self.enc, self.dec]))
     metrics['goalrec_mean'] = rec.mean()
     metrics['goalrec_std'] = rec.std()
     return metrics
