@@ -78,15 +78,14 @@ class Agent(tfagent.TFAgent):
     state, wm_outs, mets = self.wm.train(data, state)
     mets.update(self.acro_m.train({**data, 'wm_state': wm_outs['post']}))
     metrics.update(mets)
-    if not self.config.freeze_director:
-      context = {**data, **wm_outs['post']}
-      start = tf.nest.map_structure(
-          lambda x: x.reshape([-1] + list(x.shape[2:])), context)
-      _, mets = self.task_behavior.train(self.wm.imagine, start, context)
-      metrics.update(mets)
-      if self.config.expl_behavior != 'None':
-        _, mets = self.expl_behavior.train(self.wm.imagine, start, context)
-        metrics.update({'expl_' + key: value for key, value in mets.items()})
+    context = {**data, **wm_outs['post']}
+    start = tf.nest.map_structure(
+        lambda x: x.reshape([-1] + list(x.shape[2:])), context)
+    _, mets = self.task_behavior.train(self.wm.imagine, start, context)
+    metrics.update(mets)
+    if self.config.expl_behavior != 'None':
+      _, mets = self.expl_behavior.train(self.wm.imagine, start, context)
+      metrics.update({'expl_' + key: value for key, value in mets.items()})
     outs = {}
     if 'key' in data:
       criteria = {**data, **wm_outs}
@@ -162,8 +161,7 @@ class WorldModel(tfutils.Module):
       model_loss, state, outputs, metrics = self.loss(
           data, state, training=True)
     modules = [self.encoder, self.rssm, *self.heads.values()]
-    if not self.config.freeze_director:
-      metrics.update(self.model_opt(model_tape, model_loss, modules))
+    metrics.update(self.model_opt(model_tape, model_loss, [] if self.config.freeze_director else modules))
     return state, outputs, metrics
 
   def loss(self, data, state=None, training=False):
@@ -347,7 +345,7 @@ class ImagActorCritic(tfutils.Module):
       loss, mets = self.loss(traj, score)
       metrics.update(mets)
       loss = loss.mean()
-    metrics.update(self.opt(tape, loss, self.actor))
+    metrics.update(self.opt(tape, loss, [] if self.config.freeze_director else self.actor))
     return metrics
 
   def loss(self, traj, score):
@@ -410,7 +408,7 @@ class VFunction(tfutils.Module):
     with tf.GradientTape() as tape:
       dist = self.net({k: v[:-1] for k, v in traj.items()})
       loss = -(dist.log_prob(target) * traj['weight'][:-1]).mean()
-    metrics.update(self.opt(tape, loss, self.net))
+    metrics.update(self.opt(tape, loss, [] if self.config.freeze_director else self.net))
     metrics.update({
         'critic_loss': loss,
         'imag_reward_mean': reward.mean(),
@@ -490,7 +488,7 @@ class QFunction(tfutils.Module):
     with tf.GradientTape() as tape:
       dist = self.net({k: v[:-1] for k, v in traj.items()})
       loss = -(dist.log_prob(target) * traj['weight'][:-1]).mean()
-    metrics.update(self.opt(tape, loss, self.net))
+    metrics.update(self.opt(tape, loss, [] if self.config.freeze_director else self.net))
     metrics.update({
         'imag_reward_mean': reward.mean(),
         'imag_reward_std': reward.std(),
@@ -571,7 +569,7 @@ class TwinQFunction(tfutils.Module):
       loss1 = -(dist1.log_prob(target) * traj['weight'][:-1]).mean()
       loss2 = -(dist2.log_prob(target) * traj['weight'][:-1]).mean()
       loss = loss1 + loss2
-    metrics.update(self.opt(tape, loss, [self.net1, self.net2]))
+    metrics.update(self.opt(tape, loss, [] if self.config.freeze_director else [self.net1, self.net2]))
     metrics.update({
         'imag_reward_mean': reward.mean(),
         'imag_reward_std': reward.std(),
