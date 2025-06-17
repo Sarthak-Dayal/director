@@ -46,6 +46,10 @@ class ACROModule(tfutils.Module):
             units=self.config.acro_embed_size,
             **self.config.acro_embedding_head
         )
+
+        new_action_head = self.config.acro_action_head.update({"dist": "onehot" if act_space['action'].discrete else "mse"})
+        self.config = self.config.update({"acro_action_head": new_action_head})
+
         self.acro_action_head = nets.MLP(
             act_space['action'].shape,
             **self.config.acro_action_head
@@ -170,9 +174,14 @@ class ACROModule(tfutils.Module):
         return batch_t_reshaped, batch_tk_reshaped, action_t_reshaped, mask_t_reshaped
 
     def train(self, data):
-        images = data['image']  # [T, B, H, W, C]
-        actions = data['action']
-        is_terminal = data['is_terminal']  # [T, B, 1]
+        images = data['image']  # [B, T, H, W, C]
+        actions = data['action'] # [B, T, A]
+        is_terminal = data['is_terminal']  # [B, T]
+
+        # Reshape everything to [T, B, ...]
+        images = tf.transpose(images, perm=[1, 0, 2, 3, 4])  # [T, B, H, W, C]
+        actions = tf.transpose(actions, perm=[1, 0, 2])  # [T, B, A]
+        is_terminal = tf.transpose(is_terminal, perm=[1, 0])  # [T, B]
 
         # TensorArrays for metrics
         # ta_wm = tf.TensorArray(tf.float32, size=N)
@@ -184,9 +193,10 @@ class ACROModule(tfutils.Module):
         # Action update
         with tf.GradientTape() as action_tape:
             states_t, states_tk, actions_t, mask_t = self.get_acro_dataset(images, is_terminal, actions)
-            num_valid_windows = data['image'].shape[0] - self.config.frame_stack + 1
+            states_tk = states_tk * 0
+            num_valid_windows = data['image'].shape[1] - self.config.frame_stack + 1
             num_valid_states_per_batch = num_valid_windows - self.config.acro_k_step
-            states_t_shape = data['image'].shape[1] * num_valid_states_per_batch
+            states_t_shape = data['image'].shape[0] * num_valid_states_per_batch
             
             states_t = tf.ensure_shape(states_t, [states_t_shape, self.acro_state_size[0], self.acro_state_size[1], self.acro_state_size[2]])
             states_tk = tf.ensure_shape(states_tk, [states_t_shape, self.acro_state_size[0], self.acro_state_size[1], self.acro_state_size[2]])
@@ -199,11 +209,22 @@ class ACROModule(tfutils.Module):
                 'state_t': embed_t,
                 'state_tk': embed_tk
             })
-            
+
+            valid = tf.cast(mask_t, tf.float32)
             action_loss = -tf.reduce_mean(
-                action_dist.log_prob(actions_t) * tf.cast(mask_t, action_dist.dtype)
+                action_dist.log_prob(actions_t) * valid / tf.reduce_sum(valid)
             )
-            
+
+        action_pred = tf.cast(
+                tf.equal(
+                    tf.argmax(action_dist.mode(), axis=-1),
+                    tf.argmax(actions_t, axis=-1)
+                ),
+                tf.float32
+            ) * tf.cast(mask_t, tf.float32)
+
+        action_pred_acc = tf.reduce_sum(action_pred) / tf.reduce_sum(tf.cast(mask_t, tf.float32))
+
         self.opt_act(
             action_tape,
             action_loss,
@@ -244,7 +265,7 @@ class ACROModule(tfutils.Module):
         action_losses = ta_action.stack()
         decoder_losses = ta_decoder.stack()
 
-        metrics = {'acro_action_loss': action_losses, 'acro_decoder_loss': decoder_losses}
+        metrics = {'acro_action_loss': action_losses, 'acro_pred_acc': action_pred_acc, 'acro_decoder_loss': decoder_losses}
 
         return metrics
 
@@ -255,9 +276,9 @@ class ACROModule(tfutils.Module):
         is_terminal = data['is_terminal']  # [T, B, 1]
 
         states_t, _, _, _ = self.get_acro_dataset(images, is_terminal, actions)
-        num_valid_windows = data['image'].shape[0] - self.config.frame_stack + 1
+        num_valid_windows = data['image'].shape[1] - self.config.frame_stack + 1
         num_valid_states_per_batch = num_valid_windows - self.config.acro_k_step
-        states_t_shape = data['image'].shape[1] * num_valid_states_per_batch
+        states_t_shape = data['image'].shape[0] * num_valid_states_per_batch
 
         states_t = tf.ensure_shape(states_t, [states_t_shape, self.acro_state_size[0], self.acro_state_size[1],
                                               self.acro_state_size[2]])
