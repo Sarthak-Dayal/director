@@ -23,7 +23,7 @@ class SimpleColorEnv(embodied.Env):
     @property
     def act_space(self):
         return {
-            'action': embodied.Space(np.int32, (), 0, 2),
+            'action': embodied.Space(np.int32, (), 0, 3),
             'reset':  embodied.Space(bool),
         }
 

@@ -132,7 +132,7 @@ class ACROModule(tfutils.Module):
             fut = stacked_frames[t + k]
             fut = tf.ensure_shape(fut, [h, w, c * frame_k])
             
-            act = actions[t + frame_k - 1]
+            act = actions[t + frame_k]
 
             state_t = state_t.write(t, cur)
             state_tk = state_tk.write(t, fut)
@@ -187,7 +187,6 @@ class ACROModule(tfutils.Module):
         # ta_wm = tf.TensorArray(tf.float32, size=N)
         ta_action = tf.TensorArray(actions.dtype, size=1)
         ta_decoder = tf.TensorArray(tf.float32, size=1)
-        ta_action_accuracy = tf.TensorArray(tf.float32, size=1)
         idx = tf.constant(0, tf.int32)
 
         
@@ -200,8 +199,7 @@ class ACROModule(tfutils.Module):
             states_t_shape = data['image'].shape[0] * num_valid_states_per_batch
             
             states_t = tf.ensure_shape(states_t, [states_t_shape, self.acro_state_size[0], self.acro_state_size[1], self.acro_state_size[2]])
-            # states_tk = tf.ensure_shape(states_tk, [states_t_shape, self.acro_state_size[0], self.acro_state_size[1], self.acro_state_size[2]])
-            states_tk = tf.zeros_like(states_t, dtype=tf.float32)
+            states_tk = tf.ensure_shape(states_tk, [states_t_shape, self.acro_state_size[0], self.acro_state_size[1], self.acro_state_size[2]])
             actions_t = tf.ensure_shape(actions_t, [states_t_shape, actions.shape[2]])
             
             embed_t  = self.embed_acro(states_t)
@@ -236,10 +234,6 @@ class ACROModule(tfutils.Module):
                 self.acro_encoder_backbone
             ]
         )
-        
-        action_accuracy = tf.reduce_mean(
-            tf.cast(tf.equal(action_dist.mode(), actions_t), tf.float32)
-        )
 
         embed_t = self.embed_acro(states_t)
         with tf.GradientTape() as decoder_tape:
@@ -264,7 +258,6 @@ class ACROModule(tfutils.Module):
         # ta_wm = ta_wm.write(idx, wm_loss)
         ta_action = ta_action.write(idx, action_loss)
         ta_decoder = ta_decoder.write(idx, reconstruction_loss)
-        ta_action_accuracy = ta_action_accuracy.write(idx, action_accuracy)
         idx += 1
 
         # Stack and return
@@ -281,6 +274,10 @@ class ACROModule(tfutils.Module):
         images = data['image']  # [T, B, H, W, C]
         actions = data['action']
         is_terminal = data['is_terminal']  # [T, B, 1]
+        
+        images = tf.transpose(images, perm=[1, 0, 2, 3, 4])  # [T, B, H, W, C]
+        actions = tf.transpose(actions, perm=[1, 0, 2])  # [T, B, A]
+        is_terminal = tf.transpose(is_terminal, perm=[1, 0])  # [T, B]
 
         states_t, _, _, _ = self.get_acro_dataset(images, is_terminal, actions)
         num_valid_windows = data['image'].shape[1] - self.config.frame_stack + 1
