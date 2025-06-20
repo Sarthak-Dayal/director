@@ -193,7 +193,7 @@ class ACROModule(tfutils.Module):
         # Action update
         with tf.GradientTape() as action_tape:
             states_t, states_tk, actions_t, mask_t = self.get_acro_dataset(images, is_terminal, actions)
-            states_tk = states_tk * 0
+            # states_tk = states_tk * 0
             num_valid_windows = data['image'].shape[1] - self.config.frame_stack + 1
             num_valid_states_per_batch = num_valid_windows - self.config.acro_k_step
             states_t_shape = data['image'].shape[0] * num_valid_states_per_batch

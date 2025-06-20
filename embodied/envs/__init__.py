@@ -72,6 +72,9 @@ def load_single_env(
   elif suite == 'simple':
     from . import simple_color_env
     env = simple_color_env.SimpleColorEnv(size=size, seed=seed)
+  elif suite == 'line':
+    from . import number_line_env
+    env = number_line_env.NumberLineEnv(size=size, seed=seed)
   else:
     raise NotImplementedError(suite)
   for name, space in env.act_space.items():
