@@ -33,7 +33,7 @@ class Greedy(tfutils.Module):
 
 class Random(tfutils.Module):
 
-  def __init__(self, wm, act_space, config):
+  def __init__(self, wm, acro_m, act_space, config):
     self.config = config
     self.act_space = act_space
 

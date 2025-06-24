@@ -14,15 +14,11 @@ __package__ = directory.name
 
 import numpy as np
 import embodied
-import ruamel.yaml as yaml
 import tensorflow as tf
 import random
-from tensorflow_probability import distributions as tfd
 
 from . import nets
 from . import tfutils
-
-
 
 class ACROModule(tfutils.Module):
     def __init__(self, act_space, obs_space, config):
@@ -256,8 +252,8 @@ class ACROModule(tfutils.Module):
             [self.decoder_backbone]
         )
 
-        stoch = tf.transpose(data['stoch'], perm=[1, 0, 2, 3])
-        deter = tf.transpose(data['deter'], perm=[1, 0, 2])
+        stoch = tf.transpose(data['wm_state']['stoch'], perm=[1, 0, 2, 3])
+        deter = tf.transpose(data['wm_state']['deter'], perm=[1, 0, 2])
 
         # Prepare WM states
         flattened_stoch = tf.reshape(
@@ -269,11 +265,10 @@ class ACROModule(tfutils.Module):
             wm_states,
             [tf.shape(wm_states)[0] * tf.shape(wm_states)[1], -1]
         )
-        acro_cur = self.embed_acro(states_t)
         with tf.GradientTape() as translation_tape:
             wm_dist = self.translate_wm(wm_states[self.config.frame_stack - 1: self.config.frame_stack + states_t_shape - 1])
             wm_loss = -tf.reduce_sum(
-                wm_dist.log_prob(tf.cast(acro_cur, wm_dist.dtype)) * valid
+                wm_dist.log_prob(tf.cast(embed_t, wm_dist.dtype)) * valid
             ) / tf.reduce_sum(valid)
 
         self.opt_wm(translation_tape, wm_loss, [self.wm_to_acro_backbone])
