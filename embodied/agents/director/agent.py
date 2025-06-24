@@ -25,10 +25,10 @@ class Agent(tfagent.TFAgent):
     self.act_space = act_space['action']
     self.step = step
     self.wm = WorldModel(obs_space, config)
-    self.acro_m = ACROModule(act_space, config)
+    self.acro_m = ACROModule(act_space, obs_space, config)
     self.task_behavior = getattr(behaviors, config.task_behavior)(
         self.wm, self.acro_m, self.act_space, self.config)
-    # SAR TODO FIXME: WARNING: this will only work for the Hierarchy behavior because the 
+    # SAR TODO FIXME: WARNING: this will only work for the Hierarchy behavior because the
     # acro_m is not a parameter in the other behaviors. This is a temporary fix.
     if config.expl_behavior == 'None':
       self.expl_behavior = self.task_behavior
@@ -101,6 +101,7 @@ class Agent(tfagent.TFAgent):
     report.update(self.wm.report(data))
     mets = self.task_behavior.report(data)
     report.update({f'task_{k}': v for k, v in mets.items()})
+    report.update({f'acro_{k}': v for k, v in self.acro_m.report(data).items()})
     if self.expl_behavior is not self.task_behavior:
       mets = self.expl_behavior.report(data)
       report.update({f'expl_{k}': v for k, v in mets.items()})
@@ -161,7 +162,7 @@ class WorldModel(tfutils.Module):
       model_loss, state, outputs, metrics = self.loss(
           data, state, training=True)
     modules = [self.encoder, self.rssm, *self.heads.values()]
-    metrics.update(self.model_opt(model_tape, model_loss, modules))
+    metrics.update(self.model_opt(model_tape, model_loss, [] if self.config.freeze_director else modules))
     return state, outputs, metrics
 
   def loss(self, data, state=None, training=False):
@@ -215,7 +216,7 @@ class WorldModel(tfutils.Module):
     first_cont = (1.0 - start['is_terminal']).astype(tf.float32)
     keys = list(self.rssm.initial(1).keys())
     start = {k: v for k, v in start.items() if k in keys}
-    ft = tf.reshape(start['stoch'], [tf.shape(start['stoch'])[0], -1])  
+    ft = tf.reshape(start['stoch'], [tf.shape(start['stoch'])[0], -1])
     ft = tf.concat([ft, start['deter']], axis=-1)
     work_start = {'acro': acro_m.wm_to_acro_backbone(ft).mode()}
     start['action'] = policy(work_start)
@@ -223,8 +224,8 @@ class WorldModel(tfutils.Module):
       prev = prev.copy()
       action = prev.pop('action')
       state = self.rssm.img_step(prev, action)
-      ft = tf.reshape(state['stoch'], [tf.shape(state['stoch'])[0], -1])  
-      ft = tf.concat([ft, state['deter']], axis=-1)      
+      ft = tf.reshape(state['stoch'], [tf.shape(state['stoch'])[0], -1])
+      ft = tf.concat([ft, state['deter']], axis=-1)
       action = policy({"acro": acro_m.wm_to_acro_backbone(ft).mode()})
       return {**state, 'action': action}
     traj = tfutils.scan(
@@ -242,7 +243,7 @@ class WorldModel(tfutils.Module):
     start = {k: v for k, v in start.items() if k in keys}
     keys += list(carry.keys()) + ['action']
     states = [start]
-    # embedded acro_m into policy to translate to acro space and 
+    # embedded acro_m into policy to translate to acro space and
     # then feed to worker policy
     outs, carry = policy(start, carry)
     action = outs['action']
@@ -352,7 +353,7 @@ class ImagActorCritic(tfutils.Module):
       loss, mets = self.loss(traj, score)
       metrics.update(mets)
       loss = loss.mean()
-    metrics.update(self.opt(tape, loss, self.actor))
+    metrics.update(self.opt(tape, loss, [] if self.config.freeze_director else self.actor))
     return metrics
 
   def loss(self, traj, score):
@@ -415,7 +416,7 @@ class VFunction(tfutils.Module):
     with tf.GradientTape() as tape:
       dist = self.net({k: v[:-1] for k, v in traj.items()})
       loss = -(dist.log_prob(target) * traj['weight'][:-1]).mean()
-    metrics.update(self.opt(tape, loss, self.net))
+    metrics.update(self.opt(tape, loss, [] if self.config.freeze_director else self.net))
     metrics.update({
         'critic_loss': loss,
         'imag_reward_mean': reward.mean(),
@@ -495,7 +496,7 @@ class QFunction(tfutils.Module):
     with tf.GradientTape() as tape:
       dist = self.net({k: v[:-1] for k, v in traj.items()})
       loss = -(dist.log_prob(target) * traj['weight'][:-1]).mean()
-    metrics.update(self.opt(tape, loss, self.net))
+    metrics.update(self.opt(tape, loss, [] if self.config.freeze_director else self.net))
     metrics.update({
         'imag_reward_mean': reward.mean(),
         'imag_reward_std': reward.std(),
@@ -576,7 +577,7 @@ class TwinQFunction(tfutils.Module):
       loss1 = -(dist1.log_prob(target) * traj['weight'][:-1]).mean()
       loss2 = -(dist2.log_prob(target) * traj['weight'][:-1]).mean()
       loss = loss1 + loss2
-    metrics.update(self.opt(tape, loss, [self.net1, self.net2]))
+    metrics.update(self.opt(tape, loss, [] if self.config.freeze_director else [self.net1, self.net2]))
     metrics.update({
         'imag_reward_mean': reward.mean(),
         'imag_reward_std': reward.std(),

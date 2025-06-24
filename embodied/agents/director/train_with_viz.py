@@ -4,9 +4,15 @@ import warnings
 
 import embodied
 import numpy as np
+import tensorflow as tf
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+
+from embodied.agents.director import behaviors
+from embodied.replay import DiskStore
 
 
-def train_with_viz(agent, env, train_replay, eval_replay, logger, args):
+def train_with_viz(agent, env, train_replay, eval_replay, logger, args, run_tsne=False, reset_acro=False):
 
   logdir = embodied.Path(args.logdir)
   logdir.mkdirs()
@@ -107,24 +113,117 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args):
   driver.on_step(train_step)
 
   checkpoint = embodied.Checkpoint(logdir / 'checkpoint.pkl')
+  checkpoint_acro = embodied.Checkpoint(logdir / 'checkpoint_acro.pkl')
+
   checkpoint.step = step
-  checkpoint.agent = agent
+  # checkpoint.agent = agent
+  checkpoint.wm = agent.agent.wm
+  checkpoint.task_behavior = agent.agent.task_behavior
+  checkpoint.expl_behavior = agent.agent.expl_behavior
+
+  checkpoint_acro.acro_m = agent.agent.acro_m
+
   checkpoint.train_replay = train_replay
   checkpoint.eval_replay = eval_replay
   checkpoint.load_or_save()
+  checkpoint_acro.load_or_save()
 
-  print('Start training loop.')
-  policy = lambda *args: agent.policy(
-      *args, mode='explore' if should_expl(step) else 'train')
-  while step < args.steps:
-    # scalars = collections.defaultdict(list)
-    # for _ in range(args.eval_samples):
-    #   for key, value in agent.report(next(dataset_eval)).items():
-    #     if value.shape == ():
-    #       scalars[key].append(value)
-    # for name, values in scalars.items():
-    #   logger.scalar(f'eval/{name}', np.array(values, np.float64).mean())
-    logger.write()
-    driver(policy, steps=args.eval_every)
-    checkpoint.save()
+  print("reached past checkpoint.load_or_save()")
+  
+  if reset_acro:
+    acro_m = agent.agent.acro_m
+    # Reset weights in acro_m without changing references
+    print("Resetting weights in acro_m")
+
+    if hasattr(acro_m, 'reset_weights'):
+        acro_m.reset_weights()
+    elif hasattr(acro_m, 'reset_parameters'):
+        acro_m.reset_parameters()
+    else:
+        # Fallback: Reset each variable with appropriate initialization
+        for var in acro_m.variables:
+            dtype = var.dtype
+            shape = var.shape
+
+            # If the variable is not a floating‐point type, just zero it out.
+            if not dtype.is_floating:
+                var.assign(tf.zeros(shape, dtype=dtype))
+                continue
+
+            name = var.name.lower()
+            if 'kernel' in name:
+                # HeNormal is a common default for convolutional/dense kernels
+                initializer = tf.keras.initializers.HeNormal()
+                var.assign(initializer(shape, dtype=dtype))
+            elif 'bias' in name:
+                # Biases are usually initialized to zero
+                var.assign(tf.zeros(shape, dtype=dtype))
+            else:
+                # For any other floating‐point variable (e.g., layer‐norm scales, etc.),
+                # use a small uniform initializer in [-0.1, 0.1].
+                initializer = tf.keras.initializers.RandomUniform(minval=-0.1, maxval=0.1)
+                var.assign(initializer(shape, dtype=dtype))
+
+
+    print(f"Done resetting {len(list(acro_m.variables))} variables in acro_m.")
+  
+  if run_tsne:
+    # Load up offline data
+    disk = embodied.replay.DiskStore(logdir / 'episodes', parallel=False)
+
+    # Encode a bunch of images and preserve the embeddings
+    keys = disk.keys()
+    embeds = []
+    acro_k_step = 5
+    frame_k = 3
+
+    for key in list(keys)[:5]: # might want to limit this to a subset    
+      # run through ACRO encoder
+      print(f'Processing key: {key}')
+      traj = disk[key]
+      images = traj['image']
+
+      images = tf.expand_dims(images, axis=1)  # Now shape is (T, 1, W, H, C)
+
+      T = tf.shape(images)[0]
+      k = tf.constant(acro_k_step, dtype=tf.int32)
+
+      start_i = frame_k - 1
+      end_i = T - k
+      N = end_i - start_i
+
+      for i in tf.range(start_i, end_i):
+          cur = acro_m._stack_frames(images, i)
+          acro_cur2 = acro_m.embed_acro(cur)
+          embeds.append(acro_cur2.numpy())
+
+
+    # Run t-SNE on the embeddings
+    TSNE_model = TSNE(n_components=2, random_state=42)
+    embeds_2d = TSNE_model.fit_transform(np.array(embeds).squeeze(axis=1))
+
+    # Plot the results
+    plt.figure(figsize=(8,8))
+    plt.scatter(embeds_2d[:, 0], embeds_2d[:, 1])
+    plt.title('t-SNE of ACRO Embeddings')
+    plt.xlabel('Component 1')
+    plt.ylabel('Component 2')
+    plt.show()
+    plt.savefig("tsne_results.png")
+  else:
+    print('Start training loop.')
+    policy = lambda *args: agent.policy(
+        *args, mode='explore' if should_expl(step) else 'train')
+    while step < args.steps:
+      # scalars = collections.defaultdict(list)
+      # for _ in range(args.eval_samples):
+      #   for key, value in agent.report(next(dataset_eval)).items():
+      #     if value.shape == ():
+      #       scalars[key].append(value)
+      # for name, values in scalars.items():
+      #   logger.scalar(f'eval/{name}', np.array(values, np.float64).mean())
+      logger.write()
+      driver(policy, steps=args.eval_every)
+      checkpoint.save()
+      checkpoint_acro.save()
 

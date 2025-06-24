@@ -37,8 +37,8 @@ defaults:
     sync_every: 180
 
   # Agent
-  task_behavior: Hierarchy
-  expl_behavior: Random
+  task_behavior: Random
+  expl_behavior: None
   batch_size: 16
   transform_rewards: off
   expl_noise: 0.0
@@ -61,20 +61,17 @@ defaults:
   wmkl_balance: 0.8
 
   # ACRO Module
-  acro_embed_size: 64
-  frame_stack: 3
+  acro_embed_size: 1
+  frame_stack: 1
   acro_encoder_backbone: { mlp_keys: '$^', cnn_keys: 'frame_stack', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 192, cnn_kernels: [ 4, 4, 4, 4 ] }
   acro_embedding_head: {act: elu, norm: layer}
-  acro_action_head: {layers: 3, units: 256, act: elu, norm: layer, dist: mse, outscale: 1.0, inputs: ['state_t', 'state_tk']}
-  acro_k_step: 5
-  acro_opt: {opt: adam, lr: 2e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel', beta1: 0.5, beta2: 0.999}
-  acro_wm_opt: {opt: adam, lr: 2e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel', beta1: 0.5, beta2: 0.999}
-  acro_encoder: {layers: 4, units: 512, act: elu, norm: layer, dist: onehot, outscale: 0.1, unimix: 0.0, inputs: [goal]}
-  acro_decoder: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [skill]}
-  acro_kl: {impl: mult, scale: 0.0, target: 10.0, min: 1e-5, max: 1.0}
-  acro_vae_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
+  acro_action_head: {layers: 3, units: 256, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: ['state_t', 'state_tk']}
+  acro_k_step: 4
+  acro_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
+  acro_decoder_backbone: {mlp_keys: '.*', cnn_keys: '.*', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 64, cnn_kernels: [5, 5, 6, 6], image_dist: mse, inputs: [acro]}
 
   wm_to_acro_backbone: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1}
+  freeze_director: False
 
   # Actor Critic
   actor: {layers: 4, units: 512, act: elu, norm: layer, minstd: 0.03, maxstd: 1.0, outscale: 0.1, unimix: 0.01, inputs: [deter, stoch]}
@@ -111,16 +108,15 @@ defaults:
   env_skill_duration: 8
   train_skill_duration: 8
   skill_shape: [8, 8]
-  manager_rews: {extr: 1.0, expl: 0.5, goal: 0.0}
+  manager_rews: {extr: 1.0, expl: 0.1, goal: 0.0}
   worker_rews: {extr: 0.0, expl: 0.0, goal: 1.0}
-  worker_inputs: [acro, goal]
+  worker_inputs: [deter, stoch, goal]
   worker_report_horizon: 64
   skill_proposal: manager
   goal_proposal: replay
   goal_reward: cosine_max
   goal_encoder: {layers: 4, units: 512, act: elu, norm: layer, dist: onehot, outscale: 0.1, unimix: 0.0, inputs: [goal]}
   goal_decoder: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [skill]}
-  manager_goal: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [skill]}
   worker_goals: [manager]
   jointly: new
   vae_imag: False
@@ -230,4 +226,4 @@ debug:
   .*\.layers: 2
   .*\.units: 64
   .*\.wd: 0.0
-  tf: {platform: gpu, jit: True}
+  tf: {platform: gpu, jit: False}
