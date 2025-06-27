@@ -252,21 +252,31 @@ class ACROModule(tfutils.Module):
             [self.decoder_backbone]
         )
 
-        stoch = tf.transpose(data['wm_state']['stoch'], perm=[1, 0, 2, 3])
-        deter = tf.transpose(data['wm_state']['deter'], perm=[1, 0, 2])
+        stoch = data['wm_state']['stoch']
+        deter = data['wm_state']['deter']
 
         # Prepare WM states
         flattened_stoch = tf.reshape(
             stoch,
             [tf.shape(stoch)[0], tf.shape(stoch)[1], -1]
         )
-        wm_states = tf.concat([flattened_stoch, deter], axis=-1) # B, T, D
-        wm_states = tf.reshape( # B * T, D
-            wm_states,
-            [tf.shape(wm_states)[0] * tf.shape(wm_states)[1], -1]
-        )
+        wm_states = tf.concat([flattened_stoch, deter], axis=-1)
+        
+        k = self.config.frame_stack
+        K = self.config.acro_k_step
+        
+        num_valid_windows = T - k + 1
+        num_valid_per_batch = num_valid_windows - K
+        time_idx = tf.range(k - 1, k - 1 + num_valid_per_batch)   # shape [num_valid_per_batch]
+        
+        wm_states = tf.gather(wm_states, time_idx, axis=1)
+        
+        wm_states = tf.reshape(wm_states, [-1, tf.shape(wm_states)[-1]])
+        
+        tf.debugging.assert_equal(tf.shape(wm_states)[0], tf.shape(embed_t)[0])
+        
         with tf.GradientTape() as translation_tape:
-            wm_dist = self.translate_wm(wm_states[self.config.frame_stack - 1: self.config.frame_stack + states_t_shape - 1])
+            wm_dist = self.translate_wm(wm_states)
             wm_loss = -tf.reduce_sum(
                 wm_dist.log_prob(tf.cast(embed_t, wm_dist.dtype)) * valid
             ) / tf.reduce_sum(valid)
