@@ -125,7 +125,7 @@ class ACROModule(tfutils.Module):
                 acts = acts.write(t, tf.zeros_like(actions[0], dtype=acts.dtype))
                 mask = mask.write(t, tf.constant(False, dtype=tf.bool))
                 recon = recon.write(t, tf.zeros_like(images[0], dtype=recon.dtype))
-                wm_state = wm_state.write(t, tf.zeros_like(wm_state[0], dtype=wm_state.dtype))
+                wm_state = wm_state.write(t, tf.zeros_like(wm_states[0], dtype=wm_state.dtype))
                 continue
 
             # Stack frames for t and t + k
@@ -292,8 +292,10 @@ class ACROModule(tfutils.Module):
         # wm_states = tf.reshape(wm_states, [-1, tf.shape(wm_states)[-1]])
         
         tf.debugging.assert_equal(tf.shape(wm_states_t)[0], tf.shape(embed_t)[0])
+
         
         with tf.GradientTape() as translation_tape:
+            wm_states_t = tf.ensure_shape(wm_states_t, [states_t_shape, wm_states.shape[2]])
             wm_dist = self.translate_wm(wm_states_t)
             wm_loss = -tf.reduce_sum(
                 wm_dist.log_prob(tf.cast(embed_t, wm_dist.dtype)) * valid
