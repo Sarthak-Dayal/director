@@ -108,8 +108,8 @@ class Hierarchy(tfutils.Module):
     dist = self.worker.actor(sg({**worker_latent, 'goal': goal}))
     outs = {'action': dist}
     if 'image' in self.wm.heads['decoder'].shapes:
-      outs['log_goal'] = self.wm.heads['decoder']({
-          'deter': latent['deter'], 'stoch': self.wm.rssm.get_stoch(latent['deter']),
+      outs['log_goal'] = self.acro_m.decoder_backbone({
+          'acro': worker_latent['acro'],
       })['image'].mode()
       
     carry = {'step': carry['step'] + 1, 'skill': skill, 'goal': goal, 'acro': worker_latent['acro']}
