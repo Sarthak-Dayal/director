@@ -28,8 +28,6 @@ class Agent(tfagent.TFAgent):
     self.acro_m = ACROModule(act_space, obs_space, config)
     self.task_behavior = getattr(behaviors, config.task_behavior)(
         self.wm, self.acro_m, self.act_space, self.config)
-    # SAR TODO FIXME: WARNING: this will only work for the Hierarchy behavior because the
-    # acro_m is not a parameter in the other behaviors. This is a temporary fix.
     if config.expl_behavior == 'None':
       self.expl_behavior = self.task_behavior
     else:
@@ -94,14 +92,15 @@ class Agent(tfagent.TFAgent):
 
   @tf.function
   def report(self, data):
-    # SAR TODO: Guessing I should to do something with ACRO here, unsure exactly what
     self.config.tf.jit and print('Tracing report function.')
     data = self.preprocess(data)
     report = {}
     report.update(self.wm.report(data))
     mets = self.task_behavior.report(data)
     report.update({f'task_{k}': v for k, v in mets.items()})
-    report.update({f'acro_{k}': v for k, v in self.acro_m.report(data).items()})
+    post, _ = self.wm.rssm.observe(self.wm.encoder(data), data['action'], data['is_first'])
+    post_decoded = self.wm.heads['decoder'](post)
+    report.update({f'acro_{k}': v for k, v in self.acro_m.report({**data, 'wm_state': post, 'wm_state_image': post_decoded}).items()})
     if self.expl_behavior is not self.task_behavior:
       mets = self.expl_behavior.report(data)
       report.update({f'expl_{k}': v for k, v in mets.items()})

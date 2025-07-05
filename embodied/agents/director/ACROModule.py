@@ -324,13 +324,24 @@ class ACROModule(tfutils.Module):
         images = data['image']  # [B, T, H, W, C]
         actions = data['action']  # [B, T, A]
         is_terminal = data['is_terminal']  # [B, T]
+        stoch = data['wm_state']['stoch']
+        deter = data['wm_state']['deter']
+        wm_images = data['wm_state_image']['image'].mode()  # [B, T, H, W, C]
+
+        stoch = tf.transpose(stoch, perm=[1, 0, 2, 3])
+        deter = tf.transpose(deter, perm=[1, 0, 2])
+
+        # Prepare WM states
+        flattened_stoch = tf.reshape(
+            stoch,
+            [tf.shape(stoch)[0], tf.shape(stoch)[1], -1]
+        )
+        wm_states = tf.concat([flattened_stoch, deter], axis=-1)
 
         # Reshape everything to [T, B, ...]
         images = tf.transpose(images, perm=[1, 0, 2, 3, 4])  # [T, B, H, W, C]
         actions = tf.transpose(actions, perm=[1, 0, 2])  # [T, B, A]
         is_terminal = tf.transpose(is_terminal, perm=[1, 0])  # [T, B]
-
-        wm_states = tf.zeros_like(actions)
 
         states_t, _, _, _, recon_t, _ = self.get_acro_dataset(images, is_terminal, actions, wm_states)
 
@@ -355,8 +366,14 @@ class ACROModule(tfutils.Module):
 
         recon = reconstructed['image'].mean()[random_img_idx]
         recon = tf.expand_dims(recon, 0)
+        
+        # Log WM image vs translated plus reconstructed image
+        translated_wm = self.wm_to_acro_backbone(wm_states)
+        reconstructed_wm = self.decoder_backbone({"acro": translated_wm.mode()})
+        recon_wm_img = reconstructed_wm['image'].mode()
+        recon_wm_img = tf.transpose(recon_wm_img, perm=[1, 0, 2, 3, 4])
 
-        metrics = {f'acro_recon_image': tf.concat([tf.cast(img, recon.dtype), recon], 1)}
+        metrics = {f'acro_recon_image': tf.concat([tf.cast(img, recon.dtype), recon], 1), 'acro_wm_recon_image': tfutils.video_grid(tf.concat([tf.cast(wm_images, recon_wm_img.dtype), recon_wm_img], 2))}
         return metrics
 
 class ACROModuleTest(unittest.TestCase):
