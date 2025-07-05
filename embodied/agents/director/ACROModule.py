@@ -195,6 +195,7 @@ class ACROModule(tfutils.Module):
         is_terminal = data['is_terminal']  # [B, T]
         stoch = data['wm_state']['stoch']
         deter = data['wm_state']['deter']
+        metrics = {}
 
         # Reshape everything to [T, B, ...]
         images = tf.transpose(images, perm=[1, 0, 2, 3, 4])  # [T, B, H, W, C]
@@ -254,7 +255,7 @@ class ACROModule(tfutils.Module):
 
         action_pred_acc = tf.reduce_sum(action_pred) / tf.reduce_sum(tf.cast(mask_t, tf.float32))
 
-        self.opt_act(
+        metrics.update(self.opt_act(
             action_tape,
             action_loss,
             [
@@ -262,7 +263,7 @@ class ACROModule(tfutils.Module):
                 self.acro_embedding_head,
                 self.acro_encoder_backbone
             ]
-        )
+        ))
 
         embed_t = self.embed_acro(states_t)
         with tf.GradientTape() as decoder_tape:
@@ -274,11 +275,11 @@ class ACROModule(tfutils.Module):
                 reconstructed["image"].log_prob(tf.cast(recon_t, tf.float32)) * valid
             ) / tf.reduce_sum(valid)
 
-        self.opt_decoder(
+        metrics.update(self.opt_decoder(
             decoder_tape,
             reconstruction_loss,
             [self.decoder_backbone]
-        )
+        ))
 
         
         # k = self.config.frame_stack
@@ -301,7 +302,7 @@ class ACROModule(tfutils.Module):
                 wm_dist.log_prob(tf.cast(embed_t, wm_dist.dtype)) * valid
             ) / tf.reduce_sum(valid)
 
-        self.opt_wm(translation_tape, wm_loss, [self.wm_to_acro_backbone])
+        metrics.update(self.opt_wm(translation_tape, wm_loss, [self.wm_to_acro_backbone]))
 
         # Record losses
         ta_wm = ta_wm.write(idx, wm_loss)
