@@ -62,20 +62,20 @@ defaults:
 
   # ACRO Module
   acro_embed_size: 64
-  frame_stack: 3
-  acro_encoder_backbone: { mlp_keys: '$^', cnn_keys: 'frame_stack', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 192, cnn_kernels: [ 4, 4, 4, 4 ] }
-  acro_embedding_head: {act: elu, norm: layer}
+  frame_stack: 1
+  acro_encoder_backbone: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: ['wm_state']}
+  acro_embedding_head: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: ['wm_state']}
   acro_action_head: {layers: 3, units: 256, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: ['state_t', 'state_tk']}
   acro_k_step: 5
   acro_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
   acro_decoder_backbone: {mlp_keys: '.*', cnn_keys: '.*', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 64, cnn_kernels: [5, 5, 6, 6], image_dist: mse, inputs: [acro]}
-  acro_wm_opt: {opt: adam, lr: 2e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel', beta1: 0.5, beta2: 0.999}
+  # acro_wm_opt: {opt: adam, lr: 2e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel', beta1: 0.5, beta2: 0.999}
   acro_encoder: {layers: 4, units: 512, act: elu, norm: layer, dist: onehot, outscale: 0.1, unimix: 0.0, inputs: [goal]}
   acro_decoder: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [skill]}
   acro_kl: {impl: mult, scale: 0.0, target: 10.0, min: 1e-5, max: 1.0}
   acro_vae_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
 
-  wm_to_acro_backbone: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1}
+  # wm_to_acro_backbone: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1}
   freeze_director: False
 
   # Actor Critic
@@ -231,4 +231,4 @@ debug:
   .*\.layers: 2
   .*\.units: 64
   .*\.wd: 0.0
-  tf: {platform: gpu, jit: False}
+  tf: {platform: gpu, jit: True}
