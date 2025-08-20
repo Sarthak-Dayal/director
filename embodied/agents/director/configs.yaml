@@ -38,6 +38,7 @@ defaults:
 
   # Agent
   task_behavior: Hierarchy
+  acro_l2_reg_weight: 0.1
   expl_behavior: None
   batch_size: 16
   transform_rewards: off

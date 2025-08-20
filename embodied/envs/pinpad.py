@@ -3,7 +3,7 @@ import collections
 import embodied
 import numpy as np
 
-
+# TODO: what if random color conflicts with pad color/agent color?
 class PinPad(embodied.Env):
 
   COLORS = {
@@ -17,7 +17,7 @@ class PinPad(embodied.Env):
       '8': (  0, 128, 128),
   }
 
-  def __init__(self, task, length=10000):
+  def __init__(self, task, length=10000, random_background=False):
     assert length > 0
     layout = {
         'three': LAYOUT_THREE,
@@ -30,6 +30,7 @@ class PinPad(embodied.Env):
     self.layout = np.array([list(line) for line in layout.split('\n')]).T
     assert self.layout.shape == (16, 14), self.layout.shape
     self.length = length
+    self.random_background = random_background
     self.random = np.random.RandomState()
     self.pads = set(self.layout.flatten().tolist()) - set('* #\n')
     self.target = tuple(sorted(self.pads))
@@ -72,8 +73,12 @@ class PinPad(embodied.Env):
     if self.countdown:
       self.countdown -= 1
       if self.countdown == 0:
-        self.player = self.spawns[self.random.randint(len(self.spawns))]
-        self.sequence.clear()
+        if not self.random_background:
+          self.player = self.spawns[self.random.randint(len(self.spawns))]
+          self.sequence.clear()
+        else:
+          # With random_background mode, don't respawn after countdown
+          pass
     reward = 0.0
     move = [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)][action['action']]
     x = np.clip(self.player[0] + move[0], 0, 15)
@@ -86,7 +91,12 @@ class PinPad(embodied.Env):
         self.sequence.append(tile)
     if tuple(self.sequence) == self.target and not self.countdown:
       reward += 10.0
-      self.countdown = 10
+      if self.random_background:
+        # Terminate immediately when target is reached in random_background mode
+        self.done = True
+      else:
+        # Original behavior: start countdown for respawn
+        self.countdown = 10
     self.steps += 1
     self.done = self.done or (self.steps >= self.length)
     return self._obs(reward=reward, is_last=self.done)
@@ -94,7 +104,11 @@ class PinPad(embodied.Env):
   def render(self):
     grid = np.zeros((16, 16, 3), np.uint8) + 255
     white = np.array([255, 255, 255])
-    if self.countdown:
+    
+    if self.random_background:
+      # Random colored background
+      grid[:] = self.random.randint(0, 256, size=(16, 16, 3), dtype=np.uint8)
+    elif self.countdown:
       grid[:] = (223, 255, 223)
     current = self.layout[self.player[0]][self.player[1]]
     for (x, y), char in np.ndenumerate(self.layout):

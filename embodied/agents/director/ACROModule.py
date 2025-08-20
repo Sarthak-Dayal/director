@@ -24,6 +24,11 @@ class ACROModule(tfutils.Module):
     def __init__(self, act_space, obs_space, config):
         super().__init__()
         self.config = config
+        
+        # TODO: this is L1 right now, revert to L2 or run L1 experiments if you want
+        # Set default L2 regularization weight if not specified
+        if not hasattr(self.config, 'acro_l2_reg_weight'):
+            self.config = self.config.update({'acro_l2_reg_weight': 0.01})
 
         shapes = {k: tuple(v.shape) for k, v in obs_space.items()}
         shapes = {k: v for k, v in shapes.items() if k.startswith('image')}
@@ -69,7 +74,8 @@ class ACROModule(tfutils.Module):
     @tf.function
     def embed_acro(self, frame_stack):
         hidden = self.acro_encoder_backbone({"frame_stack": frame_stack})
-        return self.acro_embedding_head(hidden)
+        embedding = self.acro_embedding_head(hidden)
+        return embedding
 
     def translate_wm(self, wm_state):
         return self.wm_to_acro_backbone(wm_state)
@@ -210,6 +216,7 @@ class ACROModule(tfutils.Module):
         ta_wm = tf.TensorArray(tf.float32, size=1)
         ta_action = tf.TensorArray(actions.dtype, size=1)
         ta_decoder = tf.TensorArray(tf.float32, size=1)
+        ta_l2_reg = tf.TensorArray(tf.float32, size=1)
         idx = tf.constant(0, tf.int32)
 
         # Prepare WM states
@@ -244,6 +251,14 @@ class ACROModule(tfutils.Module):
             action_loss = -tf.reduce_sum(
                 action_dist.log_prob(actions_t) * valid / tf.reduce_sum(valid)
             )
+            
+            # Add L1 regularization loss (information bottleneck)
+            l2_reg_loss = self.config.acro_l2_reg_weight * (
+                tf.reduce_mean(tf.abs(embed_t)) + 
+                tf.reduce_mean(tf.abs(embed_tk))
+            )
+            l2_reg_loss = tf.cast(l2_reg_loss, tf.float32)
+            action_loss = action_loss + l2_reg_loss
 
         action_pred = tf.cast(
                 tf.equal(
@@ -308,14 +323,16 @@ class ACROModule(tfutils.Module):
         ta_wm = ta_wm.write(idx, wm_loss)
         ta_action = ta_action.write(idx, action_loss)
         ta_decoder = ta_decoder.write(idx, reconstruction_loss)
+        ta_l2_reg = ta_l2_reg.write(idx, l2_reg_loss)
         idx += 1
 
         # Stack and return
         wm_losses = ta_wm.stack()
         action_losses = ta_action.stack()
         decoder_losses = ta_decoder.stack()
+        l2_reg_losses = ta_l2_reg.stack()
 
-        metrics = {'acro_action_loss': action_losses, 'acro_pred_acc': action_pred_acc, 'acro_decoder_loss': decoder_losses, 'acro_translation_model': wm_losses}
+        metrics.update({'acro_action_loss': action_losses, 'acro_pred_acc': action_pred_acc, 'acro_decoder_loss': decoder_losses, 'acro_translation_model': wm_losses, 'acro_l1_reg_loss': l2_reg_losses})
 
         return metrics
 
