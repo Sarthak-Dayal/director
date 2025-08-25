@@ -196,6 +196,7 @@ class ACROModule(tfutils.Module):
         return batch_t_reshaped, batch_tk_reshaped, action_t_reshaped, mask_t_reshaped, recon_t_reshaped, wm_state_t_reshaped
 
     def train(self, data):
+        # return {}
         images = data['image']  # [B, T, H, W, C]
         actions = data['action'] # [B, T, A]
         is_terminal = data['is_terminal']  # [B, T]

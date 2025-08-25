@@ -13,14 +13,16 @@ sys.path.append(str(directory.parent.parent.parent))
 __package__ = directory.name
 
 import embodied
-from n_room_maps import EMPTY_ROOM, UNREACHABLE_TEST, FOUR_ROOMS_A, FOUR_ROOMS_B, FOUR_ROOMS_C, FOUR_ROOMS_D
+from embodied.envs.n_room_maps import *
 import numpy as np
+import cv2
 
 # wall structure in all arrays is exactly the same
 registered_layouts = {
     "empty_room": [EMPTY_ROOM],
     "unreachable": [UNREACHABLE_TEST],
-    "4_rooms": [FOUR_ROOMS_A, FOUR_ROOMS_B, FOUR_ROOMS_C, FOUR_ROOMS_D]
+    "4_rooms": [FOUR_ROOMS_A, FOUR_ROOMS_B, FOUR_ROOMS_C, FOUR_ROOMS_D],
+    "test_room": [TEST_ROOM]
 }
 
 colors = {
@@ -36,7 +38,7 @@ class NRooms(embodied.Env):
         self._possible_maps = None
         self._possible_spawn_locations = None
         self._time_limit = time_limit
-        self._collision_map = self._layout[0]
+        self._collision_map = None
 
         self._t = 0
         self._pos = None
@@ -67,17 +69,17 @@ class NRooms(embodied.Env):
         # Pick a random map
         map_idx = np.random.choice(len(self._possible_spawn_locations))
         spawn_locations = self._possible_spawn_locations[map_idx]
+        self._collision_map = self._possible_maps[map_idx]
         
         # Pick two distinct locations
         chosen = np.random.choice(len(spawn_locations), 2, replace=False)
         self._pos = spawn_locations[chosen[0]]
         self._goal = spawn_locations[chosen[1]]
-        self._collision_map = self._possible_maps[map_idx]
 
     @property
     def obs_space(self):
         return {
-            'image':      embodied.Space(np.uint8, self._collision_map.shape + (3,)),
+            'image':      embodied.Space(np.uint8, (64, 64, 3,)),
             'reward':     embodied.Space(np.float32),
             'is_first':   embodied.Space(bool),
             'is_last':    embodied.Space(bool),
@@ -142,6 +144,8 @@ class NRooms(embodied.Env):
         # Draw agent and goal
         img[self._pos[0], self._pos[1]] = colors["A"]
         img[self._goal[0], self._goal[1]] = colors["G"]
+        img = cv2.resize(img, (64, 64), interpolation=cv2.INTER_NEAREST)
+
         return {
             'image':       img,
             'reward':      np.float32(-1.0),  # always -1
@@ -153,15 +157,23 @@ class NRooms(embodied.Env):
     def render(self):
         return self._make_obs()['image']
 
+    @staticmethod
+    def render_pure(pos, goal, layout_str):
 
-if __name__ == "__main__":
-    env = NRooms("4_rooms")
-    env.reset()
-    for _ in range(10):
-        action = {'action': env.act_space['action'].sample(), "reset": False}
-        obs = env.step(action)
-        import matplotlib.pyplot as plt
-        plt.imshow(obs['image'])
-        plt.show()
-        plt.savefig("my_image.png")
-        import pdb; pdb.set_trace()
+        collision_map = registered_layouts[layout_str][0]
+        map_np = np.array([list(line) for line in collision_map.split('\n')])
+
+        h, w = len(map_np), len(map_np[0])
+        img = np.zeros((h, w, 3), dtype=np.uint8)
+
+        wall_mask = map_np == "#"
+        floor_mask = (map_np == ".") | (map_np == '-')
+
+        img[wall_mask] = colors["#"]
+        img[floor_mask] = colors["."]
+        
+        img[pos[0], pos[1]] = colors["A"]
+        img[goal[0], goal[1]] = colors["G"]
+        img = cv2.resize(img, (64, 64), interpolation=cv2.INTER_NEAREST)
+
+        return img

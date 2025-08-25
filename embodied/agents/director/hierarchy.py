@@ -533,7 +533,10 @@ class Hierarchy(tfutils.Module):
     # SAR TODO: This is wrong but I don't know the correct way to fix it yet, goals come from a variety
     # of places but them come in acro land, we need to somehow turn them into images. 
     # maybe we should make a new decoder that takes in acro and outputs images?
-    target = decoder({'deter': start['deter'], 'stoch': self.wm.rssm.get_stoch(start['deter'])})
+    target = self.acro_m.decoder_backbone({
+          'acro': goal
+    })
+    # target = decoder({'deter': start['deter'], 'stoch': self.wm.rssm.get_stoch(start['deter'])})
     rollout = decoder(traj)
     # Stich together into videos.
     videos = {}

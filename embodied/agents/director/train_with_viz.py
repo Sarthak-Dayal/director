@@ -11,8 +11,12 @@ import matplotlib.pyplot as plt
 from embodied.agents.director import behaviors
 from embodied.replay import DiskStore
 
+from umap import UMAP
+from embodied.envs.n_rooms import NRooms
+from embodied.agents.director.umap_settings import *
 
-def train_with_viz(agent, env, train_replay, eval_replay, logger, args, run_tsne=False, reset_acro=False):
+
+def train_with_viz(agent, env, train_replay, eval_replay, logger, args, run_tsne=False, run_umap=False, reset_acro=False):
 
   logdir = embodied.Path(args.logdir)
   logdir.mkdirs()
@@ -210,6 +214,145 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args, run_tsne
     plt.ylabel('Component 2')
     plt.show()
     plt.savefig("tsne_results.png")
+  elif run_umap:
+    n_neighbors = 15
+    min_dist = 0.1
+    metric = 'euclidean'
+    
+
+    umap_configuration = CORRESPONDING_POS
+
+    layout_str = umap_configuration.layout_str
+
+    # Points are stored as pos, goal
+    structured_data = umap_configuration.structured_data
+
+    images = []
+    colors = []
+    category_labels = umap_configuration.category_labels
+    point_categories = []
+    category_images = [[] for _ in range(len(structured_data))]  # Store images by category
+    
+    for i, category in enumerate(structured_data):
+      for sample in category:
+        img = NRooms.render_pure(sample[0], sample[1], layout_str)
+        images.append(img)
+        category_images[i].append(img)
+        point_categories.append(i)
+        
+        if umap_configuration.color_setting == "gradient":
+            # Interpolate between red and blue based on category index
+            # First category (i=0) will be fully red, last category will be fully blue
+            if len(structured_data) > 1:
+                # Normalize i to range [0, 1]
+                t = i / (len(structured_data) - 1)
+                # Red component decreases from 1 to 0
+                r = 1.0 - t
+                # Blue component increases from 0 to 1
+                b = t
+                colors.append([r, 0.0, b])
+            else:
+                # If there's only one category, make it red
+                colors.append([1.0, 0.0, 0.0])
+        else:
+            # Original random color generation
+            rng = np.random.default_rng(1234 + i)
+            colors.append(rng.random(3))
+    
+    images = tf.convert_to_tensor(np.array(images))
+    acro_m = agent.agent.acro_m
+    acro_embed = acro_m.embed_acro(images)
+    
+    fit = UMAP(
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        n_components=2,
+        metric=metric
+    )
+    u = fit.fit_transform(acro_embed)
+    
+    # Create a figure with two subplots: one for UMAP and one for the image grid
+    fig = plt.figure(figsize=(18, 12))
+    
+    # 1. UMAP plot
+    ax1 = fig.add_subplot(121)
+    
+    # Create a scatter plot for each category
+    for i, label in enumerate(category_labels):
+        category_points = [j for j, cat in enumerate(point_categories) if cat == i]
+        if category_points:
+            category_colors = [colors[j] for j in category_points]
+            category_embeddings = u[category_points]
+            ax1.scatter(category_embeddings[:, 0], category_embeddings[:, 1], 
+                        color=colors[category_points[0]], label=label)
+    
+    ax1.set_title('UMAP Projection of ACRO Embeddings')
+    ax1.set_xlabel('UMAP Dimension 1')
+    ax1.set_ylabel('UMAP Dimension 2')
+    # ax1.legend()
+    
+    # 2. Image grid
+    # ax2 = fig.add_subplot(122)
+    # ax2.axis('off')
+    
+    # # Limit to 4 images per category
+    # images_per_category = 4
+    # n_categories = len(category_images)
+    # grid_height = n_categories
+    # grid_width = images_per_category
+    
+    # # Create grid of images by category
+    # grid = np.ones((grid_height * 64, grid_width * 64, 3))  # Assuming 64x64 images
+    
+    # for i, cat_imgs in enumerate(category_images):
+    #     # Only use up to 4 images per category
+    #     for j, img in enumerate(cat_imgs[:images_per_category]):
+    #         # Place each image in the grid
+    #         if len(img.shape) == 3:  # Check if the image has a color channel
+    #             grid[i * 64:(i + 1) * 64, j * 64:(j + 1) * 64] = img
+    #         else:  # If it's grayscale, repeat the channel
+    #             grid[i * 64:(i + 1) * 64, j * 64:(j + 1) * 64] = np.stack([img, img, img], axis=-1)
+                
+    # # Display the grid
+    # ax2.imshow(grid)
+    
+    # # Add category labels to the left side of each row
+    # for i, label in enumerate(category_labels):
+    #     ax2.text(-5, i * 64 + 32, label, horizontalalignment='right', 
+    #             verticalalignment='center', fontsize=10)
+        
+    # ax2.set_title('Image Samples by Category')
+    plt.tight_layout()
+    plt.savefig("umap_results.png", dpi=300)
+    
+    # Create a second figure just for the image grid with more detailed labels
+    fig2, ax = plt.subplots(figsize=(15, 10))
+    ax.axis('off')
+    
+    # Create a new grid with only 4 images per category for the second figure
+    # grid2 = np.ones((grid_height * 64, grid_width * 64, 3))  # Using the same dimensions as before
+    
+    # for i, cat_imgs in enumerate(category_images):
+    #     # Only use up to 4 images per category
+    #     for j, img in enumerate(cat_imgs[:images_per_category]):
+    #         # Place each image in the grid
+    #         if len(img.shape) == 3:  # Check if the image has a color channel
+    #             grid2[i * 64:(i + 1) * 64, j * 64:(j + 1) * 64] = img
+    #         else:  # If it's grayscale, repeat the channel
+    #             grid2[i * 64:(i + 1) * 64, j * 64:(j + 1) * 64] = np.stack([img, img, img], axis=-1)
+    
+    # # Display the image grid with more space
+    # # ax.imshow(grid2)
+    
+    # # Add category labels as row headers with more visibility
+    # for i, label in enumerate(category_labels):
+    #     ax.text(-10, i * 64 + 32, label, horizontalalignment='right', 
+    #             verticalalignment='center', fontsize=12, fontweight='bold')
+    
+    # plt.tight_layout()
+    # plt.savefig("image_grid.png", dpi=300)
+    
+    import pdb; pdb.set_trace()
   else:
     print('Start training loop.')
     policy = lambda *args: agent.policy(

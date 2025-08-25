@@ -37,7 +37,7 @@ defaults:
     sync_every: 180
 
   # Agent
-  task_behavior: Hierarchy
+  task_behavior: Random
   acro_l2_reg_weight: 0.1
   expl_behavior: None
   batch_size: 16
@@ -63,11 +63,11 @@ defaults:
 
   # ACRO Module
   acro_embed_size: 64
-  frame_stack: 3
+  frame_stack: 1
   acro_encoder_backbone: { mlp_keys: '$^', cnn_keys: 'frame_stack', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 192, cnn_kernels: [ 4, 4, 4, 4 ] }
   acro_embedding_head: {act: elu, norm: layer}
   acro_action_head: {layers: 3, units: 256, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: ['state_t', 'state_tk']}
-  acro_k_step: 5
+  acro_k_step: 1
   acro_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
   acro_decoder_backbone: {mlp_keys: '.*', cnn_keys: '.*', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 64, cnn_kernels: [5, 5, 6, 6], image_dist: mse, inputs: [acro]}
   acro_wm_opt: {opt: adam, lr: 2e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel', beta1: 0.5, beta2: 0.999}

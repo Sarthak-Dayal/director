@@ -75,6 +75,9 @@ def load_single_env(
   elif suite == 'line':
     from . import number_line_env
     env = number_line_env.NumberLineEnv(size=size, seed=seed)
+  elif suite == 'nrooms':
+    from . import n_rooms
+    env = n_rooms.NRooms(task)
   else:
     raise NotImplementedError(suite)
   for name, space in env.act_space.items():

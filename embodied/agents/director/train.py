@@ -106,7 +106,7 @@ def main(argv=None):
         eval_replay = make_replay('eval_episodes', config.replay_size // 10)
       replay = make_replay('episodes', config.replay_size)
       train_with_viz.train_with_viz(
-          agent, env, replay, eval_replay, logger, args)
+          agent, env, replay, eval_replay, logger, args, run_umap=True)
     elif config.run == 'learning':
       assert config.replay.sync
       env.close()
