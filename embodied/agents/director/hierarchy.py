@@ -522,12 +522,23 @@ class Hierarchy(tfutils.Module):
     start = {k: v[:, 4] for k, v in states.items()}
     start['is_terminal'] = data['is_terminal'][:6, 4]
     goal = self.propose_goal(start, impl)
+    fixed_goal = tf.stack([goal[0]] * 6, axis=0)
+    fixed_goal = fixed_goal.reshape((6, -1))
     # Worker rollout.
     worker = lambda s: self.worker.actor({
         **s, 'goal': goal
     }).sample()
+
+    fixed_worker = lambda s: self.worker.actor({
+        **s, 'goal': fixed_goal
+    }).sample()
+
     traj = self.wm.imagine(
         worker, start, self.config.worker_report_horizon, self.acro_m)
+
+    fixed_traj = self.wm.imagine(
+        fixed_worker, start, self.config.worker_report_horizon, self.acro_m
+    )
     # Decoder into images.
     initial = decoder(start)
     # SAR TODO: This is wrong but I don't know the correct way to fix it yet, goals come from a variety
@@ -536,8 +547,13 @@ class Hierarchy(tfutils.Module):
     target = self.acro_m.decoder_backbone({
           'acro': goal
     })
+
+    fixed_target = self.acro_m.decoder_backbone({
+        'acro': fixed_goal
+    })
     # target = decoder({'deter': start['deter'], 'stoch': self.wm.rssm.get_stoch(start['deter'])})
     rollout = decoder(traj)
+    fixed_rollout = decoder(fixed_traj)
     # Stich together into videos.
     videos = {}
     for k in rollout.keys():
@@ -550,4 +566,11 @@ class Hierarchy(tfutils.Module):
         rows.append(tf.repeat(target[k].mode()[:, None], length, 1))
       rows.append(rollout[k].mode().transpose((1, 0, 2, 3, 4)))
       videos[k] = tfutils.video_grid(tf.concat(rows, 2))
+      fixed_rows = []
+      fixed_rows.append(tf.repeat(initial[k].mode()[:, None], length, 1))
+      if fixed_target is not None:
+        fixed_rows.append(tf.repeat(fixed_target[k].mode()[:, None], length, 1))
+      fixed_rows.append(fixed_rollout[k].mode().transpose((1, 0, 2, 3, 4)))
+      videos[f'acro_{k}'] = tfutils.video_grid(tf.concat(fixed_rows, 2))
+
     return videos
