@@ -59,6 +59,10 @@ python embodied/agents/director/train.py \
   --task dmc_walker_walk
 ```
 
+```sh
+python embodied/agents/director/train.py   --logdir /datastor1/abhiperi/logdir/$(date +%Y%m%d-%H%M%S)   --configs dmc_vision --task nrooms_4_rooms --task_behavior Random --frame_stack 1 --acro_k_step 3
+```
+
 See `agents/director/configs.yaml` for available flags and
 `embodied/envs/__init__.py` for available envs.
 
