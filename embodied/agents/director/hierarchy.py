@@ -514,8 +514,6 @@ class Hierarchy(tfutils.Module):
     return metrics
 
   def report_worker(self, data, impl):
-    # SAR TODO we need to make sure that we restore this so we can get the correct goal in videos. See below.
-    # Prepare initial state.
     decoder = self.wm.heads['decoder']
     states, _ = self.wm.rssm.observe(
         self.wm.encoder(data)[:6], data['action'][:6], data['is_first'][:6])
@@ -541,9 +539,6 @@ class Hierarchy(tfutils.Module):
     )
     # Decoder into images.
     initial = decoder(start)
-    # SAR TODO: This is wrong but I don't know the correct way to fix it yet, goals come from a variety
-    # of places but them come in acro land, we need to somehow turn them into images. 
-    # maybe we should make a new decoder that takes in acro and outputs images?
     target = self.acro_m.decoder_backbone({
           'acro': goal
     })
@@ -551,7 +546,6 @@ class Hierarchy(tfutils.Module):
     fixed_target = self.acro_m.decoder_backbone({
         'acro': fixed_goal
     })
-    # target = decoder({'deter': start['deter'], 'stoch': self.wm.rssm.get_stoch(start['deter'])})
     rollout = decoder(traj)
     fixed_rollout = decoder(fixed_traj)
     # Stich together into videos.
