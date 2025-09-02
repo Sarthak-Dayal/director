@@ -5,3 +5,4 @@ from .consecutive import Consecutive
 from .fixed_length import FixedLength
 from .prioritized import Prioritized
 from .dispatch import Dispatch
+from .combined_fixed_length import CombinedFixedLength

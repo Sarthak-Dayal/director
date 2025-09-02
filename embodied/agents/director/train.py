@@ -78,6 +78,15 @@ def main(argv=None):
       store = embodied.replay.CkptRAMStore(directory, capacity, parallel=True)
       cleanup.append(store)
       return embodied.replay.Prioritized(store, chunk, **config.replay_prio)
+  elif config.replay == 'fixed_and_goal':
+    def make_replay(name, capacity):
+      directory = logdir / name
+      store = embodied.replay.CkptRAMStore(directory, capacity, parallel=True)
+      goal_store = embodied.replay.CkptRAMStore(embodied.Path(config.goal_datadir), None, parallel=True)
+      cleanup.append(store)
+      cleanup.append(goal_store)
+      return embodied.replay.CombinedFixedLength(store, goal_store, chunk, **config.replay_fixed)
+
   else:
     raise NotImplementedError(config.replay)
 
