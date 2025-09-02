@@ -1,4 +1,5 @@
 import collections
+import os
 import re
 import warnings
 
@@ -15,6 +16,18 @@ from umap import UMAP
 from embodied.envs.n_rooms import NRooms
 from embodied.agents.director.umap_settings import *
 
+
+def unique_filename(base_name="umap_results", ext=".png"):
+    """
+    Generates a unique filename like:
+    umap_results.png, umap_results(1).png, umap_results(2).png, ...
+    """
+    filename = f"{base_name}{ext}"
+    counter = 1
+    while os.path.exists(filename):
+        filename = f"{base_name}({counter}){ext}"
+        counter += 1
+    return filename
 
 def train_with_viz(agent, env, train_replay, eval_replay, logger, args, run_tsne=False, run_umap=False, reset_acro=False):
 
@@ -215,12 +228,12 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args, run_tsne
     plt.show()
     plt.savefig("tsne_results.png")
   elif run_umap:
-    n_neighbors = 15
+    n_neighbors = 4
     min_dist = 0.1
     metric = 'euclidean'
     
 
-    umap_configuration = CORRESPONDING_POS
+    umap_configuration = RANDOM_GOAL_FIXED_POS
 
     layout_str = umap_configuration.layout_str
 
@@ -289,42 +302,44 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args, run_tsne
     ax1.set_title('UMAP Projection of ACRO Embeddings')
     ax1.set_xlabel('UMAP Dimension 1')
     ax1.set_ylabel('UMAP Dimension 2')
-    # ax1.legend()
+    ax1.legend()
     
     # 2. Image grid
-    # ax2 = fig.add_subplot(122)
-    # ax2.axis('off')
+    ax2 = fig.add_subplot(122)
+    ax2.axis('off')
     
-    # # Limit to 4 images per category
-    # images_per_category = 4
-    # n_categories = len(category_images)
-    # grid_height = n_categories
-    # grid_width = images_per_category
+    # Limit to 4 images per category
+    images_per_category = 4
+    n_categories = len(category_images)
+    grid_height = n_categories
+    grid_width = images_per_category
     
-    # # Create grid of images by category
-    # grid = np.ones((grid_height * 64, grid_width * 64, 3))  # Assuming 64x64 images
+    # Create grid of images by category
+    grid = np.ones((grid_height * 64, grid_width * 64, 3))  # Assuming 64x64 images
     
-    # for i, cat_imgs in enumerate(category_images):
-    #     # Only use up to 4 images per category
-    #     for j, img in enumerate(cat_imgs[:images_per_category]):
-    #         # Place each image in the grid
-    #         if len(img.shape) == 3:  # Check if the image has a color channel
-    #             grid[i * 64:(i + 1) * 64, j * 64:(j + 1) * 64] = img
-    #         else:  # If it's grayscale, repeat the channel
-    #             grid[i * 64:(i + 1) * 64, j * 64:(j + 1) * 64] = np.stack([img, img, img], axis=-1)
+    for i, cat_imgs in enumerate(category_images):
+        # Only use up to 4 images per category
+        for j, img in enumerate(cat_imgs[:images_per_category]):
+            # Place each image in the grid
+            if len(img.shape) == 3:  # Check if the image has a color channel
+                grid[i * 64:(i + 1) * 64, j * 64:(j + 1) * 64] = img
+            else:  # If it's grayscale, repeat the channel
+                grid[i * 64:(i + 1) * 64, j * 64:(j + 1) * 64] = np.stack([img, img, img], axis=-1)
                 
-    # # Display the grid
-    # ax2.imshow(grid)
+    # Display the grid
+    ax2.imshow(grid)
     
-    # # Add category labels to the left side of each row
-    # for i, label in enumerate(category_labels):
-    #     ax2.text(-5, i * 64 + 32, label, horizontalalignment='right', 
-    #             verticalalignment='center', fontsize=10)
+    # Add category labels to the left side of each row
+    for i, label in enumerate(category_labels):
+        ax2.text(-5, i * 64 + 32, label, horizontalalignment='right',
+                verticalalignment='center', fontsize=10)
         
     # ax2.set_title('Image Samples by Category')
     plt.tight_layout()
-    plt.savefig("umap_results.png", dpi=300)
-    
+    filename = unique_filename("umap_results", ".png")
+    plt.savefig(filename, dpi=300)
+    print(f"Saved figure as: {filename}")
+
     # Create a second figure just for the image grid with more detailed labels
     fig2, ax = plt.subplots(figsize=(15, 10))
     ax.axis('off')
@@ -340,7 +355,7 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args, run_tsne
     #             grid2[i * 64:(i + 1) * 64, j * 64:(j + 1) * 64] = img
     #         else:  # If it's grayscale, repeat the channel
     #             grid2[i * 64:(i + 1) * 64, j * 64:(j + 1) * 64] = np.stack([img, img, img], axis=-1)
-    
+
     # # Display the image grid with more space
     # # ax.imshow(grid2)
     

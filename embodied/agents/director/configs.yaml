@@ -2,6 +2,7 @@ defaults:
 
   # Trainer
   logdir: /dev/null
+  goal_datadir: None
   run: train_with_viz
   seed: 0
   task: dummy_discrete
