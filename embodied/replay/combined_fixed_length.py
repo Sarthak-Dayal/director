@@ -11,5 +11,4 @@ class CombinedFixedLength(FixedLength):
 
     def _sample(self):
         chunk = super()._sample()
-        chunk['shitware'] = np.array([0.0])
-
+        self.goal_buffer.sample()

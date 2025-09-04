@@ -28,11 +28,12 @@ class GoalSampler(embodied.Replay):
 
     def _sample(self):
         keys = self.store.keys()
+        sampled_size = 6
         if not keys:
             return None
         traj = self.store[keys[self.random.randint(0, len(keys))]]
-        upper = len(next(iter(traj.values())))
+        upper = len(next(iter(traj.values()))) - sampled_size + 1
         lower = 0
         index = self.random.randint(lower, upper)
-        goal = {k: traj[k][index] for k in traj.keys()}
+        goal = {k: traj[k][index : index + sampled_size] for k in traj.keys()}
         return goal

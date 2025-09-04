@@ -22,7 +22,9 @@ registered_layouts = {
     "empty_room": [EMPTY_ROOM],
     "unreachable": [UNREACHABLE_TEST],
     "4_rooms": [FOUR_ROOMS_A, FOUR_ROOMS_B, FOUR_ROOMS_C, FOUR_ROOMS_D],
-    "test_room": [TEST_ROOM]
+    "test_room": [TEST_ROOM],
+    "4_rooms_allways": [FOUR_ROOMS_ALLWAYS],
+    "4_rooms_1_hallway": [FOUR_ROOMS_1_HALLWAY_A, FOUR_ROOMS_1_HALLWAY_B, FOUR_ROOMS_1_HALLWAY_C]
 }
 
 colors = {
@@ -44,6 +46,7 @@ class NRooms(embodied.Env):
         self._pos = None
         self._goal = None
         self._done = False
+        self._prev_pos = None
 
         self.parse_maps(self._layout)
         self.reset()
@@ -56,8 +59,7 @@ class NRooms(embodied.Env):
         for i, map_str in enumerate(raw_maps):
             map_np = np.array([list(line) for line in map_str.split('\n')])
             self._possible_maps[i] = map_np
-
-        self._possible_spawn_locations = np.array([np.argwhere(map_np == '.') for map_np in self._possible_maps])
+        self._possible_spawn_locations = [np.argwhere(map_np == '.') for map_np in self._possible_maps]
 
     def reset(self):
         """
@@ -75,6 +77,7 @@ class NRooms(embodied.Env):
         chosen = np.random.choice(len(spawn_locations), 2, replace=False)
         self._pos = spawn_locations[chosen[0]]
         self._goal = spawn_locations[chosen[1]]
+        self._prev_pos = self._pos.copy()
 
     @property
     def obs_space(self):
@@ -131,6 +134,7 @@ class NRooms(embodied.Env):
 
         # check if new position is valid
         if self._collision_map[new_pos[0], new_pos[1]] != '#':
+            self._prev_pos = self._pos.copy()
             self._pos = new_pos
 
     def _make_obs(self, is_first=False, is_last=False, is_terminal=False):
@@ -148,11 +152,17 @@ class NRooms(embodied.Env):
 
         return {
             'image':       img,
-            'reward':      np.float32(-1.0),  # always -1
+            'reward':      self.get_reward(),
             'is_first':    is_first,
             'is_last':     is_last,
             'is_terminal': is_terminal,
         }
+
+    def get_reward(self):
+        # negative delta L1 distance to goal
+        prev_dist = np.sum(np.abs(self._prev_pos - self._goal))
+        curr_dist = np.sum(np.abs(self._pos - self._goal))
+        return prev_dist - curr_dist
 
     def render(self):
         return self._make_obs()['image']
