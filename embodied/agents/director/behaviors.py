@@ -5,7 +5,8 @@ from . import agent
 from . import expl
 from . import tfutils
 
-from .hierarchy import Hierarchy  # noqa
+from .hierarchy import Hierarchy
+from .og_hierarchy import OG_Hierarchy
 
 
 class Greedy(tfutils.Module):

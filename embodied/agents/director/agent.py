@@ -217,7 +217,7 @@ class WorldModel(tfutils.Module):
     start = {k: v for k, v in start.items() if k in keys}
     ft = tf.reshape(start['stoch'], [tf.shape(start['stoch'])[0], -1])
     ft = tf.concat([ft, start['deter']], axis=-1)
-    work_start = {'acro': acro_m.wm_to_acro_backbone(ft).mode()}
+    work_start = {'acro': acro_m.wm_to_acro_backbone(ft).mode(), 'deter': start['deter'], 'stoch': start['stoch']}
     start['action'] = policy(work_start)
     def step(prev, _):
       prev = prev.copy()
@@ -225,7 +225,7 @@ class WorldModel(tfutils.Module):
       state = self.rssm.img_step(prev, action)
       ft = tf.reshape(state['stoch'], [tf.shape(state['stoch'])[0], -1])
       ft = tf.concat([ft, state['deter']], axis=-1)
-      action = policy({"acro": acro_m.wm_to_acro_backbone(ft).mode()})
+      action = policy({"acro": acro_m.wm_to_acro_backbone(ft).mode(), 'deter': state['deter'], 'stoch': state['stoch']})
       return {**state, 'action': action}
     traj = tfutils.scan(
         step, tf.range(horizon), start, self.config.imag_unroll)
